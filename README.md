@@ -92,7 +92,7 @@ python deezload.py [OPTIONS]
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC` (default: `FLAC`) |
+| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC` | `FLAC` |
 | `--concurrency` | Number of parallel download threads | `1` |
 | `--output` | Custom output directory path | Current Directory |
 | `--dry-run` | Preview downloads without saving files | Disabled |
