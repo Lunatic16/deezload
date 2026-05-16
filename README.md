@@ -58,13 +58,13 @@ The ARL (Authentication Remember Login) token is a long-lived session cookie use
 
 ```bash
 # Download a track (FLAC by default)
-python deezer-downloader.py --arl YOUR_ARL_TOKEN --url "https://www.deezer.com/track/3135556"
+python deezload.py --arl YOUR_ARL_TOKEN --url "https://www.deezer.com/track/3135556"
 
 # Save your token so you don't have to pass it every time
-python deezer-downloader.py --arl YOUR_ARL_TOKEN --save-config
+python deezload.py --arl YOUR_ARL_TOKEN --save-config
 
 # Now download without --arl
-python deezer-downloader.py --url "https://www.deezer.com/track/3135556"
+python deezload.py --url "https://www.deezer.com/track/3135556"
 ```
 
 ---
@@ -72,7 +72,7 @@ python deezer-downloader.py --url "https://www.deezer.com/track/3135556"
 ## Usage
 
 ```
-python deezer-downloader.py [OPTIONS]
+python deezload.py [OPTIONS]
 ```
 
 ### Options
@@ -93,19 +93,19 @@ python deezer-downloader.py [OPTIONS]
 
 ```bash
 # Single track by URL
-python deezer-downloader.py --url "https://www.deezer.com/track/3135556"
+python deezload.py --url "https://www.deezer.com/track/3135556"
 
 # Single track by ID, MP3 320
-python deezer-downloader.py --track-id 3135556 --quality MP3_320
+python deezload.py --track-id 3135556 --quality MP3_320
 
 # Full album, saved to a custom directory
-python deezer-downloader.py --album "https://www.deezer.com/album/302127" --output ~/Music
+python deezload.py --album "https://www.deezer.com/album/302127" --output ~/Music
 
 # Full playlist
-python deezer-downloader.py --playlist "https://www.deezer.com/playlist/1963962142"
+python deezload.py --playlist "https://www.deezer.com/playlist/1963962142"
 
 # Download at 128kbps MP3
-python deezer-downloader.py --url "https://www.deezer.com/track/3135556" --quality MP3_128
+python deezload.py --url "https://www.deezer.com/track/3135556" --quality MP3_128
 ```
 
 ---
@@ -161,10 +161,10 @@ output = downloads
 **Config management:**
 ```bash
 # Save current settings as defaults
-python deezer-downloader.py --arl YOUR_TOKEN --quality FLAC --output ~/Music --save-config
+python deezload.py --arl YOUR_TOKEN --quality FLAC --output ~/Music --save-config
 
 # View current config
-python deezer-downloader.py --show-config
+python deezload.py --show-config
 ```
 
 CLI arguments always take precedence over config file values.
