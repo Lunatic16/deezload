@@ -14,22 +14,25 @@ Requirements:
  - mutagen
 
 Usage:
- python deezload.py --arl <YOUR_ARL_TOKEN> --url <TRACK_URL>
+ python deezload.py --arl <YOUR_ARL_TOKEN> --url <TRACK_OR_PLAYLIST_OR_ALBUM_URL>
  python deezload.py --arl <YOUR_ARL_TOKEN> --playlist <PLAYLIST_URL>
  python deezload.py --arl <YOUR_ARL_TOKEN> --album <ALBUM_URL>
+ python deezload.py --arl <YOUR_ARL_TOKEN> --url <URL> --concurrency 4
+ python deezload.py --url <URL> --dry-run
+ python deezload.py --arl <TOKEN> --save-config
 """
 
 import argparse
 import base64
+import concurrent.futures
 import functools
 import hashlib
-import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, Any, Tuple
 from enum import Enum
 from configparser import ConfigParser
 
@@ -49,17 +52,15 @@ except ImportError:
 
 try:
     from Crypto.Cipher import AES, Blowfish
-    from Crypto.Util import Counter
 except ImportError:
     print("Error: pycryptodome not installed. Run: pip install pycryptodome")
     sys.exit(1)
 
 try:
-    from mutagen.id3 import ID3, TIT2, TALB, TPE1, TPE2, TCOM, TRCK, TPOS, TYER, TDAT, TCON, \
-        TDRC, APIC, ID3NoHeaderError, USLT, COMM, TBPM, TKEY, WOAS, TSRC, TLEN
+    from mutagen.id3 import ID3, TIT2, TALB, TPE1, TPE2, TCOM, TRCK, TPOS, TYER, TCON, \
+        TDRC, APIC, ID3NoHeaderError, USLT, COMM, TBPM, WOAS, TSRC, TLEN
     from mutagen.mp3 import MP3
-    from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
+    from mutagen.flac import FLAC, Picture
     MUTAGEN_AVAILABLE = True
 except ImportError:
     MUTAGEN_AVAILABLE = False
@@ -84,6 +85,28 @@ class AudioQuality(Enum):
         return mapping.get(self.value, 1)
 
 
+# Global verbosity flag — set by main() from --verbose / --quiet args
+_VERBOSE = False
+_QUIET = False
+
+
+def log(msg: str, level: str = "info") -> None:
+    """
+    Centralised print with verbosity control.
+
+    Levels:
+      debug  — only printed when --verbose is set
+      info   — printed unless --quiet is set
+      warn   — always printed
+      error  — always printed
+    """
+    if level == "debug" and not _VERBOSE:
+        return
+    if level == "info" and _QUIET:
+        return
+    print(msg)
+
+
 class DeezerDownloader:
     """Main downloader class that handles authentication and downloads"""
 
@@ -99,23 +122,26 @@ class DeezerDownloader:
     # Blowfish key for encrypted downloads (from streamrip)
     BLOWFISH_SECRET = "g4el58wc0zvf9na1"
 
-    def __init__(self, arl_token: str, quality: AudioQuality = AudioQuality.FLAC):
+    def __init__(self, arl_token: str, quality: AudioQuality = AudioQuality.FLAC,
+                 concurrency: int = 1):
         """
         Initialize the downloader with ARL authentication.
 
         Args:
             arl_token: ARL (Authentication Remember Login) token
             quality: Desired audio quality
+            concurrency: Number of parallel download threads
         """
         self.arl_token = arl_token
         self.quality = quality
+        self.concurrency = concurrency
         self.session = self._create_session()
         self.client = deezer.Deezer()
         self.user_id: Optional[str] = None
         self.license_token: Optional[str] = None
 
     def _create_session(self) -> requests.Session:
-        """Create a requests session with retry logic"""
+        """Create a requests session with retry logic and timeouts"""
         session = requests.Session()
 
         # Set up retry strategy
@@ -137,6 +163,9 @@ class DeezerDownloader:
             "Content-Type": "application/json",
         })
 
+        # Default timeouts: 10s connect, 60s read
+        session.request = functools.partial(session.request, timeout=(10, 60))  # type: ignore
+
         return session
 
     def authenticate(self) -> bool:
@@ -153,7 +182,7 @@ class DeezerDownloader:
                 # Get user info from current_user (available after login)
                 user_data = self.client.current_user
                 self.user_id = str(user_data.get('id', ''))
-                print(f"✓ Authenticated as user: {user_data.get('name', 'Unknown')} (ID: {self.user_id})")
+                log(f"✓ Authenticated as user: {user_data.get('name', 'Unknown')} (ID: {self.user_id})")
 
                 # Store license token for later use
                 if 'license_token' in user_data:
@@ -161,10 +190,10 @@ class DeezerDownloader:
 
                 return True
             else:
-                print("✗ Authentication failed. Check your ARL token.")
+                log("✗ Authentication failed. Check your ARL token.", level="error")
                 return False
         except Exception as e:
-            print(f"✗ Authentication error: {e}")
+            log(f"✗ Authentication error: {e}", level="error")
             return False
 
     def get_track_info(self, track_id: str) -> Optional[Dict[str, Any]]:
@@ -183,7 +212,7 @@ class DeezerDownloader:
             if track:
                 return track
         except Exception as e:
-            print(f"Error getting track info: {e}")
+            log(f"Error getting track info via gateway: {e}", level="debug")
 
         # Fallback: try direct API
         try:
@@ -193,7 +222,7 @@ class DeezerDownloader:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            print(f"Error getting track info (fallback): {e}")
+            log(f"Error getting track info (fallback): {e}", level="debug")
 
         return None
 
@@ -255,7 +284,7 @@ class DeezerDownloader:
             response.raise_for_status()
             return response.content
         except Exception as e:
-            print(f" Warning: Could not download cover art: {e}")
+            log(f" Warning: Could not download cover art: {e}", level="warn")
             return None
 
     def _generate_blowfish_key(self, track_id: str) -> bytes:
@@ -274,65 +303,58 @@ class DeezerDownloader:
             b"\x00\x01\x02\x03\x04\x05\x06\x07",
         ).decrypt(data)
 
-    def get_download_url(self, track_id: str, track_token: Optional[str] = None) -> Optional[str]:
+    def get_download_url(self, track_id: str,
+                         track_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """
         Get the download URL for a track using deezer-py library.
 
         Args:
             track_id: Deezer track ID
-            track_token: Optional track token for DRM
+            track_info: Pre-fetched track info dict (avoids a redundant API call)
 
         Returns:
             Download URL or None
         """
-        try:
-            # Get track info which includes TRACK_TOKEN
+        # Reuse caller's track_info if provided; otherwise fetch once
+        if track_info is None:
             track_info = self.get_track_info(track_id)
-            if not track_info:
-                return None
+        if not track_info:
+            return None
 
+        try:
             # Get the track token
             token = track_info.get('TRACK_TOKEN')
             if not token:
-                print(" ✗ No track token available")
-                return None
+                log(" ✗ No track token available", level="warn")
+                return self._construct_encrypted_url(track_id, track_info)
 
-            # Map quality to streamrip format
-            quality_map = {
-                "MP3_128": "MP3_128",
-                "MP3_320": "MP3_320",
-                "FLAC": "FLAC"
-            }
-            quality_str = quality_map.get(self.quality.value, "MP3_320")
+            quality_str = self.quality.value
 
             # Use deezer-py's get_track_url method
-            # This handles the complex token exchange internally
             url = self.client.get_track_url(token, quality_str)
             if url:
+                log(f" ✓ URL resolved via token exchange", level="debug")
                 return url
 
-            # If that failed, try fallback quality
-            return self._construct_encrypted_url(track_id, track_info.get('MD5_ORIGIN', ''), self.quality.format_id)
+            # Primary failed — fall back to encrypted URL construction
+            log(" Falling back to encrypted URL construction", level="debug")
+            return self._construct_encrypted_url(track_id, track_info)
 
         except Exception as e:
-            print(f"Error getting download URL: {e}")
-            # Fallback to encrypted URL construction
-            track_info = self.get_track_info(track_id)
-            if track_info:
-                return self._construct_encrypted_url(track_id, track_info.get('MD5_ORIGIN', ''), self.quality.format_id)
-            return None
+            log(f"Error getting download URL: {e}", level="debug")
+            return self._construct_encrypted_url(track_id, track_info)
 
-    def _construct_encrypted_url(self, track_id: str, track_md5: str, quality: int) -> Optional[str]:
+    def _construct_encrypted_url(self, track_id: str,
+                                  track_info: Dict[str, Any]) -> Optional[str]:
         """Construct encrypted download URL (streamrip approach)."""
         try:
-            # Get media version from track info
-            track_info = self.get_track_info(track_id)
-            media_version = ""
-            if track_info and 'MEDIA_VERSION' in track_info:
-                media_version = str(track_info['MEDIA_VERSION'])
+            track_md5 = track_info.get('MD5_ORIGIN', '')
+            media_version = str(track_info.get('MEDIA_VERSION', '1') or '1')
+            quality = self.quality.format_id
 
-            if not media_version:
-                media_version = "1"  # Default fallback
+            if not track_md5:
+                log(" ✗ MD5_ORIGIN missing — cannot construct fallback URL", level="warn")
+                return None
 
             # Build the string to encrypt
             # Format: {md5}{quality}{media_version}{track_id}
@@ -348,73 +370,85 @@ class DeezerDownloader:
             encrypted = cipher.encrypt(to_encrypt.encode())
             encrypted_hex = encrypted.hex()
 
-            # Construct URL
             # Use first character of MD5 to select CDN
             cdn_index = track_md5[0]
             url = f"https://e-cdns-proxy-{cdn_index}.dzcdn.net/mobile/1/{encrypted_hex}"
 
+            log(f" ✓ Fallback URL constructed", level="debug")
             return url
         except Exception as e:
-            print(f"Error constructing encrypted URL: {e}")
+            log(f"Error constructing encrypted URL: {e}", level="debug")
             return None
 
-    def download_track(self, track_id: str, output_dir: str = "downloads", track_num: int = None, disc_num: int = None) -> Optional[str]:
+    def download_track(self, track_id: str, output_dir: str = "downloads",
+                       track_num: Optional[int] = None,
+                       disc_num: Optional[int] = None,
+                       progress_cb=None) -> Optional[str]:
         """
         Download a single track.
 
         Args:
             track_id: Deezer track ID
             output_dir: Directory to save downloaded file
+            track_num: Optional track number (for album downloads)
+            disc_num: Optional disc number (for album downloads)
+            progress_cb: Optional callable(pct: float) for progress updates.
+                         When provided the inline \r progress bar is suppressed.
 
         Returns:
             Path to downloaded file or None
         """
-        print(f"Downloading track {track_id}...")
+        # In concurrent mode, suppress the noisy "Downloading track …" line;
+        # the caller's slot display already shows track name + progress.
+        if progress_cb is None:
+            log(f"Downloading track {track_id}...")
 
-        # Get track info
+        # Get track info once and reuse for URL resolution + tagging
         track_info = self.get_track_info(track_id)
         if not track_info:
-            print(f" ✗ Could not get track info for {track_id}")
+            log(f" ✗ Could not get track info for {track_id}", level="error")
             return None
 
-        # Get download URL
-        download_url = self.get_download_url(track_id)
+        # Get download URL, passing track_info to avoid a second API call
+        download_url = self.get_download_url(track_id, track_info=track_info)
         if not download_url:
-            print(f" ✗ Could not get download URL for {track_id}")
+            log(f" ✗ Could not get download URL for {track_id}", level="error")
             return None
 
         # Create output directory
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # Download the file
+        # Build filename with safe sanitisation (Enhancement 18)
+        artist = track_info.get("ART_NAME") or track_info.get("artist", {}).get("name", "Unknown Artist")
+        title = track_info.get("SNG_TITLE") or track_info.get("title", "Unknown Title")
+        extension = ".flac" if self.quality == AudioQuality.FLAC else ".mp3"
+        if track_num is not None:
+            raw_name = f"{track_num:02d} - {artist} - {title}{extension}"
+        else:
+            raw_name = f"{artist} - {title}{extension}"
+        filename = sanitise_filename(raw_name)
+        filepath = output_path / filename
+
+        # Enhancement 8: skip already-downloaded files
+        if filepath.exists():
+            log(f" ⏭ Skipping (already exists): {filepath}")
+            return str(filepath)
+
+        # Enhancement 6: write to a .part temp file; rename on success
+        part_path = filepath.with_suffix(filepath.suffix + ".part")
+
         try:
             response = self.session.get(download_url, stream=True)
             response.raise_for_status()
 
-            # Determine filename (handle both API formats)
-            # From gw.get_track(): ART_NAME, SNG_TITLE
-            # From api.deezer.com: artist.name, title
-            artist = track_info.get("ART_NAME") or track_info.get("artist", {}).get("name", "Unknown Artist")
-            title = track_info.get("SNG_TITLE") or track_info.get("title", "Unknown Title")
-            # Use correct extension based on quality
-            extension = ".flac" if self.quality == AudioQuality.FLAC else ".mp3"
-            # Include track number in filename if provided (for album downloads)
-            if track_num is not None:
-                filename = f"{track_num:02d} - {artist} - {title}{extension}"
-            else:
-                filename = f"{artist} - {title}{extension}"
-            filepath = output_path / filename
-
-            # Download with progress + Blowfish decryption
-            # Deezer encrypts every 3rd 2048-byte block with Blowfish CBC
             total_size = int(response.headers.get('content-length', 0))
             chunk_size = 2048
             downloaded = 0
             block_index = 0
             bf_key = self._generate_blowfish_key(track_id)
 
-            with open(filepath, 'wb') as f:
+            with open(part_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if not chunk:
                         continue
@@ -425,10 +459,21 @@ class DeezerDownloader:
                     downloaded += len(chunk)
                     block_index += 1
                     if total_size > 0:
-                        progress = (downloaded / total_size) * 100
-                        print(f'\r Progress: {progress:.1f}%', end='')
+                        pct = (downloaded / total_size) * 100
+                        if progress_cb is not None:
+                            progress_cb(pct)
+                        elif not _QUIET:
+                            # Sequential mode: simple inline progress bar
+                            bar_width = 30
+                            filled = int(bar_width * pct / 100)
+                            bar = "█" * filled + "░" * (bar_width - filled)
+                            print(f"\r [{bar}] {pct:5.1f}%", end="", flush=True)
 
-            print(f"\n ✓ Downloaded: {filepath}")
+            # Rename .part → final filename only after full successful write
+            part_path.rename(filepath)
+            if progress_cb is None and not _QUIET:
+                print()  # newline after the progress bar
+            log(f" ✓ Downloaded: {filepath.name}")
 
             # Add metadata tags if mutagen is available
             if MUTAGEN_AVAILABLE:
@@ -437,7 +482,12 @@ class DeezerDownloader:
             return str(filepath)
 
         except Exception as e:
-            print(f"\n ✗ Download failed: {e}")
+            if progress_cb is None and not _QUIET:
+                print()  # newline after progress bar if interrupted
+            log(f" ✗ Download failed: {e}", level="error")
+            # Clean up partial file
+            if part_path.exists():
+                part_path.unlink()
             return None
 
     def _add_tags(self, filepath: str, track_info: Dict[str, Any]):
@@ -473,8 +523,8 @@ class DeezerDownloader:
             # Get total tracks from album if available
             track_total = track_info.get('nb_tracks', '')
 
-            # Disc number
-            disc_number = track_info.get('DISK_NUMBER') or track_info.get('disk_number', '') or track_info.get('disk_number', 1)
+            # Disc number — fix: was looking up 'disk_number' twice
+            disc_number = track_info.get('DISK_NUMBER') or track_info.get('disk_number', 1)
             disc_total = track_info.get('DISK_TOTAL') or track_info.get('nb_disk', '')
 
             # Format track/disc numbers as "current/total"
@@ -586,13 +636,19 @@ class DeezerDownloader:
                 if duration:
                     audio['LENGTH'] = str(duration)
 
-                # Embed cover art
+                # Embed cover art using mutagen's Picture block (Enhancement 1)
                 if cover_art_data:
                     try:
-                        picture_block = base64.b64encode(cover_art_data).decode('ascii')
-                        audio['METADATA_BLOCK_PICTURE'] = picture_block
+                        pic = Picture()
+                        pic.data = cover_art_data
+                        pic.type = 3       # Cover (front)
+                        pic.mime = 'image/jpeg'
+                        pic.width = 1000
+                        pic.height = 1000
+                        pic.depth = 24
+                        audio.add_picture(pic)
                     except Exception as pic_err:
-                        print(f" Warning: Could not embed FLAC cover art: {pic_err}")
+                        log(f" Warning: Could not embed FLAC cover art: {pic_err}", level="warn")
 
                 audio.save()
             else:
@@ -657,7 +713,7 @@ class DeezerDownloader:
                 # URL to official audio source
                 track_url = track_info.get('TRACK_URL') or track_info.get('link', '')
                 if track_url:
-                    audio.tags.add(WOAS(encoding=3, text=track_url))
+                    audio.tags.add(WOAS(url=track_url))
 
                 # Lyrics (if available)
                 lyrics = track_info.get('LYRICS') or track_info.get('lyrics', '')
@@ -676,112 +732,280 @@ class DeezerDownloader:
 
                 audio.save()
 
-            print(f" ✓ Added metadata tags")
+            log(f" ✓ Added metadata tags")
 
         except Exception as e:
-            print(f" Warning: Could not add tags: {e}")
+            log(f" Warning: Could not add tags: {e}", level="warn")
 
     def download_playlist(self, playlist_id: str, output_dir: str = "downloads"):
         """
-        Download all tracks from a playlist.
+        Download all tracks from a playlist (handles pagination).
 
         Args:
             playlist_id: Deezer playlist ID
             output_dir: Directory to save downloaded files
         """
-        print(f"Downloading playlist {playlist_id}...")
+        log(f"Downloading playlist {playlist_id}...")
 
         try:
-            response = self.session.get(
-                f"https://api.deezer.com/2.0/playlist/{playlist_id}/tracks"
-            )
+            # Enhancement 4: follow 'next' pagination links to get all tracks
+            tracks: list = []
+            url: Optional[str] = f"https://api.deezer.com/2.0/playlist/{playlist_id}/tracks?limit=100"
 
-            if response.status_code != 200:
-                print(f" ✗ Could not get playlist: {response.status_code}")
+            while url:
+                response = self.session.get(url)
+                if response.status_code != 200:
+                    log(f" ✗ Could not get playlist page: {response.status_code}", level="error")
+                    break
+                data = response.json()
+                page_tracks = data.get('data', [])
+                tracks.extend(page_tracks)
+                url = data.get('next')  # None when on last page
+
+            if not tracks:
+                log(" ✗ No tracks found in playlist", level="error")
                 return
 
-            data = response.json()
-            tracks = data.get('data', [])
-
-            print(f" Found {len(tracks)} tracks")
-
-            # Download each track
-            for i, track in enumerate(tracks, 1):
-                track_id = str(track['id'])
-                print(f"\n[{i}/{len(tracks)}] Track {track_id}")
-                self.download_track(track_id, output_dir)
-                time.sleep(0.5)  # Rate limiting
+            log(f" Found {len(tracks)} tracks")
+            self._download_track_list(tracks, output_dir)
 
         except Exception as e:
-            print(f" ✗ Error downloading playlist: {e}")
+            log(f" ✗ Error downloading playlist: {e}", level="error")
+    def download_artist(self, artist_id: str, output_dir: str = "downloads"):
+        """
+        Enhancement 7: Download all albums for an artist.
+
+        Args:
+            artist_id: Deezer artist ID
+            output_dir: Root directory; each album gets its own subdirectory
+        """
+        log(f"Fetching discography for artist {artist_id}...")
+        try:
+            response = self.session.get(
+                f"https://api.deezer.com/2.0/artist/{artist_id}/albums?limit=100"
+            )
+            response.raise_for_status()
+            data = response.json()
+            albums = data.get('data', [])
+            if not albums:
+                log(" ✗ No albums found for this artist", level="error")
+                return
+            log(f" Found {len(albums)} albums")
+            for album in albums:
+                album_id = str(album['id'])
+                log(f"\n→ Album: {album.get('title', album_id)}")
+                self.download_album(album_id, output_dir)
+        except Exception as e:
+            log(f" ✗ Error downloading artist discography: {e}", level="error")
+
+    def _download_track_list(self, tracks: list, output_dir: str,
+                              track_nums: Optional[list] = None,
+                              disc_nums: Optional[list] = None):
+        """
+        Download a list of tracks, sequentially or concurrently.
+        In concurrent mode each worker slot owns a fixed terminal row so
+        progress lines never collide.
+        """
+        import threading
+        import shutil
+
+        total = len(tracks)
+        concurrent_mode = self.concurrency > 1
+
+        if concurrent_mode:
+            log(f" Downloading {total} tracks with {self.concurrency} threads")
+            n_slots = self.concurrency
+            print("\n" * n_slots, end="", flush=True)
+
+            _lock = threading.Lock()
+            _slot_map: Dict[int, int] = {}
+            _slot_counter = [0]
+            term_width = shutil.get_terminal_size((80, 24)).columns
+
+            def _move_to_slot(slot: int) -> None:
+                up = n_slots - slot
+                sys.stdout.write(f"\033[{up}A\r")
+
+            def _restore() -> None:
+                sys.stdout.write(f"\033[{n_slots}B\r")
+
+            def _update_slot(slot: int, text: str) -> None:
+                col = term_width - 2
+                line = text[:col].ljust(col)
+                with _lock:
+                    _move_to_slot(slot)
+                    sys.stdout.write(line)
+                    _restore()
+                    sys.stdout.flush()
+
+            def _clear_slot(slot: int, final_line: str) -> None:
+                col = term_width - 2
+                line = final_line[:col].ljust(col)
+                with _lock:
+                    _move_to_slot(slot)
+                    sys.stdout.write(line + "\n")
+                    _restore()
+                    sys.stdout.flush()
+
+            def _progress_cb(slot: int, track_label: str, pct: float) -> None:
+                bar_width = 20
+                filled = int(bar_width * pct / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                _update_slot(slot, f" ⬇ {track_label}  [{bar}] {pct:5.1f}%")
+
+            def _do_download_concurrent(args: Tuple) -> Optional[str]:
+                i, track = args
+                tid = threading.get_ident()
+                with _lock:
+                    if tid not in _slot_map:
+                        _slot_map[tid] = _slot_counter[0]
+                        _slot_counter[0] += 1
+                slot = _slot_map[tid]
+
+                track_id = str(track["id"])
+                t_num = track_nums[i - 1] if track_nums else None
+                d_num = disc_nums[i - 1] if disc_nums else None
+                title = track.get("title", track_id)
+                label = f"[{i}/{total}] {title}"
+
+                _update_slot(slot, f" ⏳ {label}  [{chr(0x2591) * 20}]   0.0%")
+
+                result = self.download_track(
+                    track_id, output_dir,
+                    track_num=t_num, disc_num=d_num,
+                    progress_cb=lambda pct: _progress_cb(slot, label, pct),
+                )
+
+                if result:
+                    _clear_slot(slot, f" ✓ {label}")
+                else:
+                    _clear_slot(slot, f" ✗ {label}  (failed)")
+
+                return result
+
+            indexed = list(enumerate(tracks, 1))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+                list(executor.map(_do_download_concurrent, indexed))
+
+        else:
+            for i, track in enumerate(tracks, 1):
+                track_id = str(track["id"])
+                t_num = track_nums[i - 1] if track_nums else None
+                d_num = disc_nums[i - 1] if disc_nums else None
+                title = track.get("title", track_id)
+                log(f"\n[{i}/{total}] {title}")
+                self.download_track(track_id, output_dir, track_num=t_num, disc_num=d_num)
+                time.sleep(0.5)
+
     def download_album(self, album_id: str, output_dir: str = "downloads"):
         """
-        Download all tracks from an album using the deezer library.
+        Download all tracks from an album.
         Creates a directory for the album with track numbers in filenames.
 
         Args:
             album_id: Deezer album ID
             output_dir: Directory to save downloaded files
         """
-        print(f"Downloading album {album_id}...")
+        log(f"Downloading album {album_id}...")
 
         try:
-            # Use deezer library to get album metadata and tracks
             album_metadata = self.client.api.get_album(album_id)
             album_tracks_response = self.client.api.get_album_tracks(album_id)
 
             if not album_metadata or not album_tracks_response:
-                print(f" ✗ Could not get album data from API")
+                log(" ✗ Could not get album data from API", level="error")
                 return
 
             tracks_data = album_tracks_response.get('data', [])
             if not tracks_data:
-                print(f" ✗ No tracks found in album")
+                log(" ✗ No tracks found in album", level="error")
                 return
 
-            # Create album directory using album name
             album_name = album_metadata.get('title', 'Unknown Album')
             artist_name = album_metadata.get('artist', {}).get('name', 'Unknown Artist')
-            # Sanitize names for filesystem
-            safe_album_name = "".join(c for c in album_name if c.isalnum() or c in ' -_').strip()
-            safe_artist_name = "".join(c for c in artist_name if c.isalnum() or c in ' -_').strip()
-            from pathlib import Path
+
+            # Enhancement 13: removed inner `from pathlib import Path`
+            # Enhancement 18: use safe sanitisation instead of stripping all non-alnum
+            safe_album_name = sanitise_filename(album_name)
+            safe_artist_name = sanitise_filename(artist_name)
             album_dir = Path(output_dir) / f"{safe_artist_name} - {safe_album_name}"
             album_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f" Album: {safe_artist_name} - {safe_album_name}")
-            print(f" Directory: {album_dir}")
-            print(f" Found {len(tracks_data)} tracks")
+            log(f" Album: {safe_artist_name} - {safe_album_name}")
+            log(f" Directory: {album_dir}")
+            log(f" Found {len(tracks_data)} tracks")
 
-            # Download each track with track number info
-            for i, track in enumerate(tracks_data, 1):
-                track_id = str(track['id'])
-                track_num = track.get('track_position', i)
-                disc_num = track.get('disk_number', 1)
-                print(f"\n[{i}/{len(tracks_data)}] Track {track_num}: {track.get('title', 'Unknown')}")
-                self.download_track(track_id, str(album_dir), track_num=track_num, disc_num=disc_num)
-                time.sleep(0.5) # Rate limiting
+            # Save Cover.jpg to the album folder
+            cover_path = album_dir / "Cover.jpg"
+            if not cover_path.exists():
+                cover_url = (
+                    album_metadata.get('cover_xl')
+                    or album_metadata.get('cover_big')
+                    or album_metadata.get('cover_medium')
+                )
+                if not cover_url:
+                    # Build URL from picture hash the same way get_cover_art_url does
+                    picture_id = album_metadata.get('picture') or album_metadata.get('cover')
+                    if picture_id:
+                        cover_url = f"https://cdns-images.dzcdn.net/images/cover/{picture_id}/1000x1000-000000-80-0-0.jpg"
+                if cover_url:
+                    cover_data = self.download_cover_art(cover_url)
+                    if cover_data:
+                        cover_path.write_bytes(cover_data)
+                        log(f" ✓ Saved Cover.jpg")
+                    else:
+                        log(" Warning: Could not download album cover art", level="warn")
+                else:
+                    log(" Warning: No cover art URL found for album", level="warn")
+
+            track_nums = [t.get('track_position', i + 1) for i, t in enumerate(tracks_data)]
+            disc_nums = [t.get('disk_number', 1) for t in tracks_data]
+
+            self._download_track_list(tracks_data, str(album_dir),
+                                       track_nums=track_nums, disc_nums=disc_nums)
 
         except Exception as e:
-            print(f" ✗ Error downloading album: {e}")
+            log(f" ✗ Error downloading album: {e}", level="error")
+
+
+def sanitise_filename(name: str) -> str:
+    """
+    Enhancement 18: Replace only filesystem-illegal characters, preserving
+    accented letters, punctuation, and Unicode that are safe on modern OSes.
+
+    Replaces  / \\ : * ? " < > |  with an en-dash and strips leading/trailing
+    whitespace and dots (Windows compat).
+    """
+    illegal = r'[/\\:*?"<>|]'
+    return re.sub(illegal, '-', name).strip('. ')
+
+
+def extract_id_and_type(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Enhancement 7: Extract numeric ID *and* content type from a Deezer URL.
+
+    Returns:
+        (id, type) where type is one of 'track', 'playlist', 'album', 'artist'
+        or (None, None) if no match.
+    """
+    patterns = [
+        (r'/track/(\d+)',    'track'),
+        (r'/song/(\d+)',     'track'),
+        (r'/playlist/(\d+)', 'playlist'),
+        (r'/album/(\d+)',    'album'),
+        (r'/artist/(\d+)',   'artist'),
+    ]
+    for pattern, url_type in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1), url_type
+    return None, None
 
 
 def extract_id_from_url(url: str) -> Optional[str]:
-    """Extract ID from Deezer URL"""
-    # Match patterns like /track/12345, /playlist/12345, /album/12345
-    patterns = [
-    r'/track/(\d+)',
-    r'/playlist/(\d+)',
-    r'/album/(\d+)',
-    r'/song/(\d+)',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-
-    return None
+    """Extract numeric ID from a Deezer URL (backwards-compatible wrapper)."""
+    id_, _ = extract_id_and_type(url)
+    return id_
 
 
 def get_config_path() -> Path:
@@ -825,7 +1049,7 @@ def load_config() -> Dict[str, str]:
     return config
 
 
-def save_config(arl_token: str, quality: str = 'MP3_320', output: str = 'downloads'):
+def save_config(arl_token: str, quality: str = 'FLAC', output: str = 'downloads'):
     """Save configuration to Deezload config file."""
     config_path = get_config_path()
 
@@ -842,7 +1066,11 @@ def save_config(arl_token: str, quality: str = 'MP3_320', output: str = 'downloa
     with open(config_path, 'w') as f:
         parser.write(f)
 
-    print(f"✓ Deezload configuration saved to {config_path}")
+    # Enhancement 19: security reminder — ARL grants full account access
+    os.chmod(config_path, 0o600)
+    log(f"✓ Deezload configuration saved to {config_path}")
+    log("⚠ Config file permissions set to 600 (owner read/write only).")
+    log("  Your ARL token grants full Deezer account access — keep this file private.")
 
 
 def main():
@@ -852,10 +1080,15 @@ def main():
         epilog="""
 Examples:
  %(prog)s --url "https://www.deezer.com/track/12345"
+ %(prog)s --url "https://www.deezer.com/playlist/12345"   # auto-detected
+ %(prog)s --url "https://www.deezer.com/album/12345"      # auto-detected
+ %(prog)s --url "https://www.deezer.com/artist/12345"     # downloads discography
  %(prog)s --playlist "https://www.deezer.com/playlist/12345"
  %(prog)s --album "https://www.deezer.com/album/12345"
  %(prog)s --track-id 12345 --quality FLAC
- %(prog)s --save-config  # Save current settings as defaults
+ %(prog)s --save-config                # Save current settings as defaults
+ %(prog)s --url "..." --dry-run        # Preview without downloading
+ %(prog)s --url "..." --concurrency 4  # Parallel downloads
 
 Configuration:
   Configuration is stored in ~/.config/deezload/deezload-config.ini
@@ -867,51 +1100,73 @@ Configuration:
         "--arl",
         help="ARL (Authentication Remember Login) token from Deezer (or set in config)"
     )
-
     parser.add_argument(
         "--url",
-        help="Deezer URL (track, playlist, or album)"
+        help="Deezer URL — track, playlist, album, or artist (type auto-detected)"
     )
-
     parser.add_argument(
         "--track-id",
         help="Direct track ID to download"
     )
-
     parser.add_argument(
         "--playlist",
         help="Download all tracks from a playlist URL"
     )
-
     parser.add_argument(
         "--album",
         help="Download all tracks from an album URL"
     )
-
     parser.add_argument(
         "--quality",
         choices=["MP3_128", "MP3_320", "FLAC"],
         help="Audio quality (default: FLAC or from config)"
     )
-
     parser.add_argument(
         "--output",
         help="Output directory (default: downloads or from config)"
     )
-
     parser.add_argument(
         "--save-config",
         action="store_true",
         help="Save current settings (including ARL token) as defaults"
     )
-
     parser.add_argument(
         "--show-config",
         action="store_true",
         help="Show current configuration and exit"
     )
+    # Enhancement 9
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show debug output (API calls, URL resolution steps)"
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress all non-error output (useful for scripting)"
+    )
+    # Enhancement 11
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of parallel download threads (default: 1)"
+    )
+    # Enhancement 8 (dry-run flag)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve track info and print filenames without downloading"
+    )
 
     args = parser.parse_args()
+
+    # Enhancement 9: set global verbosity flags
+    global _VERBOSE, _QUIET
+    _VERBOSE = args.verbose
+    _QUIET = args.quiet
 
     # Load config file
     config = load_config()
@@ -919,17 +1174,17 @@ Configuration:
     # Show config if requested
     if args.show_config:
         config_path = get_config_path()
-        print(f"Deezload configuration file: {config_path}")
+        log(f"Deezload configuration file: {config_path}")
         if config_path.exists():
-            print("\nContents:")
+            log("\nContents:")
             with open(config_path) as f:
-                print(f.read())
+                log(f.read())
         else:
-            print("\nNo configuration file found.")
-        print("\nAvailable settings:")
-        print(f"  arl_token: {'[SET]' if config.get('arl_token') else '[NOT SET]'}")
-        print(f"  quality: {config.get('quality', 'MP3_320')}")
-        print(f"  output: {config.get('output', 'downloads')}")
+            log("\nNo configuration file found.")
+        log("\nAvailable settings:")
+        log(f"  arl_token: {'[SET]' if config.get('arl_token') else '[NOT SET]'}")
+        log(f"  quality: {config.get('quality', 'FLAC')}")
+        log(f"  output: {config.get('output', 'downloads')}")
         sys.exit(0)
 
     # Get values from args, config, or defaults
@@ -941,10 +1196,10 @@ Configuration:
     if not arl_token:
         parser.error("ARL token is required. Provide --arl or set it in config file.")
 
-    # Save config if requested
+    # Save config if requested (Enhancement 19: security note printed inside save_config)
     if args.save_config:
         save_config(arl_token, quality, output_dir)
-        print("Configuration saved. You can now omit --arl from future commands.")
+        log("Configuration saved. You can now omit --arl from future commands.")
         sys.exit(0)
 
     # Validate input
@@ -953,44 +1208,68 @@ Configuration:
 
     # Create downloader
     quality_enum = AudioQuality(quality)
-    downloader = DeezerDownloader(arl_token, quality_enum)
+    downloader = DeezerDownloader(arl_token, quality_enum, concurrency=args.concurrency)
+
+    if args.dry_run:
+        log("Dry-run mode — no files will be downloaded")
 
     # Authenticate
-    print("Authenticating...")
+    log("Authenticating...")
     if not downloader.authenticate():
         sys.exit(1)
 
     # Process download request
     try:
         if args.track_id:
-            downloader.download_track(args.track_id, output_dir)
+            if args.dry_run:
+                info = downloader.get_track_info(args.track_id)
+                log(f" Would download: {info.get('SNG_TITLE', args.track_id) if info else args.track_id}")
+            else:
+                downloader.download_track(args.track_id, output_dir)
 
         elif args.url:
-            track_id = extract_id_from_url(args.url)
-            if not track_id:
-                print(f"Error: Could not extract ID from URL: {args.url}")
+            # Enhancement 12: auto-detect URL type and route correctly
+            content_id, url_type = extract_id_and_type(args.url)
+            if not content_id:
+                log(f"Error: Could not extract ID from URL: {args.url}", level="error")
                 sys.exit(1)
-            downloader.download_track(track_id, output_dir)
+            log(f" Detected URL type: {url_type}", level="debug")
+            if url_type == 'track':
+                if args.dry_run:
+                    info = downloader.get_track_info(content_id)
+                    log(f" Would download: {info.get('SNG_TITLE', content_id) if info else content_id}")
+                else:
+                    downloader.download_track(content_id, output_dir)
+            elif url_type == 'playlist':
+                downloader.download_playlist(content_id, output_dir)
+            elif url_type == 'album':
+                downloader.download_album(content_id, output_dir)
+            elif url_type == 'artist':
+                log(f"Artist URL detected — downloading all albums for artist {content_id}")
+                downloader.download_artist(content_id, output_dir)
+            else:
+                log(f"Error: Unsupported URL type '{url_type}'", level="error")
+                sys.exit(1)
 
         elif args.playlist:
             playlist_id = extract_id_from_url(args.playlist)
             if not playlist_id:
-                print(f"Error: Could not extract ID from URL: {args.playlist}")
+                log(f"Error: Could not extract ID from URL: {args.playlist}", level="error")
                 sys.exit(1)
             downloader.download_playlist(playlist_id, output_dir)
 
         elif args.album:
             album_id = extract_id_from_url(args.album)
             if not album_id:
-                print(f"Error: Could not extract ID from URL: {args.album}")
+                log(f"Error: Could not extract ID from URL: {args.album}", level="error")
                 sys.exit(1)
             downloader.download_album(album_id, output_dir)
 
     except KeyboardInterrupt:
-        print("\n\nDownload cancelled by user")
+        log("\n\nDownload cancelled by user")
         sys.exit(1)
     except Exception as e:
-        print(f"\nUnexpected error: {e}")
+        log(f"\nUnexpected error: {e}", level="error")
         sys.exit(1)
 
 
