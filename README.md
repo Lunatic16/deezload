@@ -84,10 +84,19 @@ python deezload.py [OPTIONS]
 | `--track-id ID` | Download a single track by its numeric Deezer ID |
 | `--playlist URL` | Download all tracks from a playlist URL |
 | `--album URL` | Download all tracks from an album URL |
-| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC` (default: `FLAC`) |
 | `--output DIR` | Output directory (default: `downloads/`) |
 | `--save-config` | Save current `--arl`, `--quality`, and `--output` as defaults |
 | `--show-config` | Print current configuration and exit |
+
+### Advanced Options
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC` (default: `FLAC`) |
+| `--concurrency` | Number of parallel download threads | `1` |
+| `--output` | Custom output directory path | Current Directory |
+| `--dry-run` | Preview downloads without saving files | Disabled |
+| `--verbose` | Enable debug logging | Disabled |
 
 ### Examples
 
@@ -122,6 +131,7 @@ downloads/
 ```
 downloads/
 └── Artist Name - Album Title/
+    ├── Cover.jpg
     ├── 01 - Artist Name - Track One.flac
     ├── 02 - Artist Name - Track Two.flac
     └── 03 - Artist Name - Track Three.flac
@@ -195,6 +205,26 @@ When `mutagen` is installed, downloaded files are tagged with all available meta
 | Cover Art | APIC | METADATA_BLOCK_PICTURE |
 
 Cover art is downloaded at 1000×1000px and embedded as JPEG.
+
+---
+
+## Architecture
+
+### Directory Structure
+
+```
+├── deezload.py                # Main CLI entry point and core logic
+├── requirements.txt           # Python dependencies
+├── deezload-config.example.ini # Example configuration file
+└── README.md                  # This documentation
+```
+
+### Core Logic
+
+- **`DeezerDownloader` Class**: The central orchestrator for session authentication, URL resolution, stream decryption, and file system operations.
+- **`AudioQuality` Enum**: Maps requested quality settings to Deezer's internal format IDs.
+- **Metadata Tagging**: Employs `mutagen` to apply appropriate ID3 tags (MP3) or FLAC tags to downloaded files.
+- **Error Handling**: Implements retry mechanisms for network requests and utilizes a centralized `log` function for progress tracking and debugging.
 
 ---
 
