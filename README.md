@@ -213,10 +213,10 @@ Cover art is downloaded at 1000×1000px and embedded as JPEG.
 ### Directory Structure
 
 ```
-├── deezload.py                # Main CLI entry point and core logic
-├── requirements.txt           # Python dependencies
+├── deezload.py                 # Main CLI entry point and core logic
+├── requirements.txt            # Python dependencies
 ├── deezload-config.example.ini # Example configuration file
-└── README.md                  # This documentation
+└── README.md                   # This documentation
 ```
 
 ### Core Logic
