@@ -26,6 +26,29 @@ A fast, feature-complete command-line tool for downloading music from Deezer. Su
 
 ---
 
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting Your ARL Token](#getting-your-arl-token)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Options](#options)
+  - [Advanced Options](#advanced-options)
+  - [Examples](#examples)
+- [Output Structure](#output-structure)
+- [Configuration](#configuration)
+- [Metadata Tags](#metadata-tags)
+- [Architecture](#architecture)
+  - [Directory Structure](#directory-structure)
+  - [Core Logic](#core-logic)
+- [Troubleshooting](#troubleshooting)
+- [How It Works](#how-it-works)
+- [Legal Notice](#legal-notice)
+
+---
+
 ## Requirements
 
 - Python 3.7+
