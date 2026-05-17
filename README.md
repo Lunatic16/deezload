@@ -1,8 +1,9 @@
 <p align="center">
-  <a href="YOUR_DEEZER_LINK_HERE">
+  <a href="[YOUR_DEEZER_LINK_HERE](https://github.com/topics/deezer)">
     <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200" alt="Deezer Logo">
   </a>
 </p>
+
 # Deezload - Deezer Music Downloader CLI
 
 A command-line tool for downloading music from Deezer with full metadata tagging. Supports individual tracks, full playlists, and complete albums in MP3 or lossless FLAC quality.
