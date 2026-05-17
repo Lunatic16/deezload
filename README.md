@@ -1,5 +1,5 @@
 <div align="center" style="background-color: #121212; padding: 20px; border-radius: 10px;">
-  <img src="[https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg](https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg)" width="200">
+  <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200">
 </div>
 
 # Deezload - Deezer Music Downloader CLI
