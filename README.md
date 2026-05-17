@@ -1,6 +1,8 @@
-<div align="center" style="background-color: #121212; padding: 20px; border-radius: 10px;">
-  <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200">
-</div>
+<p align="center">
+  <a href="https://github.com/topics/deezer">
+    <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200" alt="Deezer Logo">
+  </a>
+</p>
 
 # Deezload - Deezer Music Downloader CLI
 
