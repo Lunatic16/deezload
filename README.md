@@ -6,20 +6,23 @@
 
 # Deezload - Deezer Music Downloader CLI
 
-A command-line tool for downloading music from Deezer with full metadata tagging. Supports individual tracks, full playlists, and complete albums in MP3 or lossless FLAC quality.
+A fast, feature-complete command-line tool for downloading music from Deezer. Supports tracks, albums, playlists, and full artist discographies in lossless FLAC or MP3, with parallel downloads, rich metadata tagging, embedded cover art, and share link resolution.
 
 ---
 
 ## Features
 
-- Download tracks, playlists, and albums from Deezer URLs or IDs
-- Three quality tiers: MP3 128kbps, MP3 320kbps, FLAC (lossless)
-- On-the-fly Blowfish stream decryption
-- Full metadata tagging — title, artist, album, track/disc numbers, year, genre, ISRC, BPM, lyrics, and embedded cover art (1000×1000)
-- Supports both MP3 (ID3v2) and FLAC (Vorbis comments) tag formats
-- Persistent config file — save your ARL token once, omit it from every subsequent command
-- Automatic retry on HTTP failures with exponential backoff
-- Album downloads organised into `Artist - Album/` subdirectories with zero-padded track numbers
+- **Any Deezer URL** — tracks, albums, playlists, artists, and share/redirect links all work with a single `--url` flag
+- **Three quality tiers** — MP3 128kbps, MP3 320kbps, FLAC lossless (default)
+- **Parallel downloads** — configurable thread count with a per-slot live progress bar per thread
+- **Full metadata tagging** — 16+ fields written to ID3v2 (MP3) and Vorbis comments (FLAC)
+- **Cover art** — embedded at 1000×1000px; also saved as `Cover.jpg` in album folders
+- **Skip existing files** — re-running on the same folder skips already-downloaded tracks
+- **Safe filenames** — only replaces the 9 actually-illegal filesystem characters, preserving accents, apostrophes, and Unicode
+- **Persistent config** — save your ARL token once, never type it again
+- **Share link resolution** — `deezer.page.link`, `link.deezer.com`, and other redirect URLs resolved automatically
+- **Dry run mode** — preview what would be downloaded without writing any files
+- **Graceful failure** — incomplete `.part` files are cleaned up on failure; completed files are never re-downloaded
 
 ---
 
@@ -71,6 +74,9 @@ python deezload.py --arl YOUR_ARL_TOKEN --save-config
 
 # Now download without --arl
 python deezload.py --url "https://www.deezer.com/track/3135556"
+
+# Share links work too
+python deezload.py --url "https://link.deezer.com/s/33i3Lx16xPyuahDtZguSl"
 ```
 
 ---
@@ -107,20 +113,29 @@ python deezload.py [OPTIONS]
 ### Examples
 
 ```bash
-# Single track by URL
+# Single track
 python deezload.py --url "https://www.deezer.com/track/3135556"
 
-# Single track by ID, MP3 320
-python deezload.py --track-id 3135556 --quality MP3_320
+# Album — creates an Artist - Album/ subdirectory with Cover.jpg
+python deezload.py --url "https://www.deezer.com/album/302127"
 
-# Full album, saved to a custom directory
-python deezload.py --album "https://www.deezer.com/album/302127" --output ~/Music
+# Playlist
+python deezload.py --url "https://www.deezer.com/playlist/1963962142"
 
-# Full playlist
-python deezload.py --playlist "https://www.deezer.com/playlist/1963962142"
+# Full artist discography
+python deezload.py --url "https://www.deezer.com/artist/246791"
 
-# Download at 128kbps MP3
-python deezload.py --url "https://www.deezer.com/track/3135556" --quality MP3_128
+# Share link (resolved automatically, no extra flags needed)
+python deezload.py --url "https://link.deezer.com/s/33i3Lx16xPyuahDtZguSl"
+
+# Album at MP3 320 with 4 parallel threads
+python deezload.py --album "https://www.deezer.com/album/302127" --quality MP3_320 --concurrency 4
+
+# Preview an album without downloading anything
+python deezload.py --url "https://www.deezer.com/album/302127" --dry-run
+
+# Download to a specific folder, silently (good for scripts)
+python deezload.py --url "https://www.deezer.com/album/302127" --output ~/Music --quiet
 ```
 
 ---
@@ -149,6 +164,17 @@ downloads/
 ├── Artist A - Track One.flac
 ├── Artist B - Track Two.flac
 └── Artist C - Track Three.flac
+```
+**Artist discography:**
+```
+downloads/
+├── Artist - Album 1/
+│   ├── Cover.jpg
+│   └── 01 - Artist - Track One.flac
+├── Artist - Album 2/
+│   ├── Cover.jpg
+│   └── ...
+└── ...
 ```
 
 File extension is `.flac` for FLAC quality, `.mp3` for both MP3 tiers.
@@ -255,11 +281,12 @@ The script logs the error and continues to the next track. Check the console out
 
 ## How It Works
 
-1. **Authentication** — logs in via your ARL cookie using `deezer-py`, which retrieves a session and license token.
-2. **Track resolution** — fetches track metadata from Deezer's private gateway API (falls back to the public REST API).
-3. **URL resolution** — retrieves a signed download URL via `deezer-py`. If unavailable, constructs one using AES-128-ECB encryption of the track's MD5 hash, quality tier, media version, and ID.
-4. **Download + decryption** — streams the audio in 2048-byte chunks. Every third chunk is Blowfish-CBC decrypted using a key derived from the track ID and a known secret.
-5. **Tagging** — writes all available metadata fields and embeds cover art using `mutagen`.
+1. **Share link resolution** — every URL is passed through `resolve_deezer_url()`, which follows redirects and strips tracking parameters to produce a clean canonical URL. Canonical `deezer.com` URLs are returned immediately with no HTTP request.
+2. **Authentication** — logs in via ARL cookie using `deezer-py`, retrieving a session and license token.
+3. **Track info** — metadata is fetched from Deezer's private gateway API (`gw.get_track`), with automatic fallback to the public REST API at `api.deezer.com`.
+4. **Download URL** — a signed CDN URL is obtained via `deezer-py`'s token exchange. If that fails, a fallback URL is constructed using AES-128-ECB encryption of the track's MD5 hash, quality tier, media version, and ID.
+5. **Stream + decrypt** — the audio stream arrives in 2048-byte chunks. Every third chunk is Blowfish-CBC decrypted using a key derived from the track ID and a fixed secret. Audio is written to a `.part` temporary file and atomically renamed to the final path only on success.
+6. **Tagging** — all available metadata fields and cover art are written using `mutagen`.
 
 ---
 
