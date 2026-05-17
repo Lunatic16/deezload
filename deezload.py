@@ -473,11 +473,11 @@ class DeezerDownloader:
             part_path.rename(filepath)
             if progress_cb is None and not _QUIET:
                 print()  # newline after the progress bar
-            log(f" ✓ Downloaded: {filepath.name}")
+                log(f" ✓ Downloaded: {filepath.name}")
 
             # Add metadata tags if mutagen is available
             if MUTAGEN_AVAILABLE:
-                self._add_tags(str(filepath), track_info)
+                self._add_tags(str(filepath), track_info, silent=(progress_cb is not None))
 
             return str(filepath)
 
@@ -490,7 +490,7 @@ class DeezerDownloader:
                 part_path.unlink()
             return None
 
-    def _add_tags(self, filepath: str, track_info: Dict[str, Any]):
+    def _add_tags(self, filepath: str, track_info: Dict[str, Any], silent: bool = False):
         """Add comprehensive metadata tags to downloaded file (MP3 or FLAC)"""
         if not MUTAGEN_AVAILABLE:
             return
@@ -732,7 +732,8 @@ class DeezerDownloader:
 
                 audio.save()
 
-            log(f" ✓ Added metadata tags")
+            if not silent:
+                log(f" ✓ Added metadata tags")
 
         except Exception as e:
             log(f" Warning: Could not add tags: {e}", level="warn")
@@ -802,90 +803,73 @@ class DeezerDownloader:
                               track_nums: Optional[list] = None,
                               disc_nums: Optional[list] = None):
         """
-        Download a list of tracks, sequentially or concurrently.
-        In concurrent mode each worker slot owns a fixed terminal row so
-        progress lines never collide.
+        Download a list of tracks sequentially or concurrently.
+
+        Sequential mode: one track at a time with an inline progress bar.
+        Concurrent mode: each completed track prints a single ✓/✗ line.
+                         A single shared status line (\r) shows which tracks
+                         are currently active — no ANSI cursor tricks needed.
         """
         import threading
         import shutil
 
         total = len(tracks)
-        concurrent_mode = self.concurrency > 1
 
-        if concurrent_mode:
+        if self.concurrency > 1:
             log(f" Downloading {total} tracks with {self.concurrency} threads")
-            n_slots = self.concurrency
-            print("\n" * n_slots, end="", flush=True)
-
-            _lock = threading.Lock()
-            _slot_map: Dict[int, int] = {}
-            _slot_counter = [0]
             term_width = shutil.get_terminal_size((80, 24)).columns
+            _lock = threading.Lock()
+            # Track which labels are currently downloading
+            _active: Dict[int, str] = {}   # thread_id -> label
 
-            def _move_to_slot(slot: int) -> None:
-                up = n_slots - slot
-                sys.stdout.write(f"\033[{up}A\r")
-
-            def _restore() -> None:
-                sys.stdout.write(f"\033[{n_slots}B\r")
-
-            def _update_slot(slot: int, text: str) -> None:
-                col = term_width - 2
-                line = text[:col].ljust(col)
-                with _lock:
-                    _move_to_slot(slot)
-                    sys.stdout.write(line)
-                    _restore()
-                    sys.stdout.flush()
-
-            def _clear_slot(slot: int, final_line: str) -> None:
-                col = term_width - 2
-                line = final_line[:col].ljust(col)
-                with _lock:
-                    _move_to_slot(slot)
-                    sys.stdout.write(line + "\n")
-                    _restore()
-                    sys.stdout.flush()
-
-            def _progress_cb(slot: int, track_label: str, pct: float) -> None:
-                bar_width = 20
-                filled = int(bar_width * pct / 100)
-                bar = "█" * filled + "░" * (bar_width - filled)
-                _update_slot(slot, f" ⬇ {track_label}  [{bar}] {pct:5.1f}%")
+            def _render_status() -> None:
+                """Overwrite the current line with all active track names."""
+                if _active:
+                    names = ", ".join(_active.values())
+                    line = f" ⬇ {names}"
+                else:
+                    line = ""
+                line = line[:term_width - 1].ljust(term_width - 1)
+                sys.stdout.write("\r" + line)
+                sys.stdout.flush()
 
             def _do_download_concurrent(args: Tuple) -> Optional[str]:
                 i, track = args
                 tid = threading.get_ident()
-                with _lock:
-                    if tid not in _slot_map:
-                        _slot_map[tid] = _slot_counter[0]
-                        _slot_counter[0] += 1
-                slot = _slot_map[tid]
-
                 track_id = str(track["id"])
                 t_num = track_nums[i - 1] if track_nums else None
                 d_num = disc_nums[i - 1] if disc_nums else None
                 title = track.get("title", track_id)
                 label = f"[{i}/{total}] {title}"
 
-                _update_slot(slot, f" ⏳ {label}  [{chr(0x2591) * 20}]   0.0%")
+                with _lock:
+                    _active[tid] = label
+                    _render_status()
 
                 result = self.download_track(
                     track_id, output_dir,
                     track_num=t_num, disc_num=d_num,
-                    progress_cb=lambda pct: _progress_cb(slot, label, pct),
+                    progress_cb=lambda pct: None,  # suppress inline bar
                 )
 
-                if result:
-                    _clear_slot(slot, f" ✓ {label}")
-                else:
-                    _clear_slot(slot, f" ✗ {label}  (failed)")
+                with _lock:
+                    del _active[tid]
+                    # Clear the status line, then print the final result
+                    sys.stdout.write("\r" + " " * (term_width - 1) + "\r")
+                    if result:
+                        print(f" ✓ {label}")
+                    else:
+                        print(f" ✗ {label}  (failed)")
+                    _render_status()
 
                 return result
 
             indexed = list(enumerate(tracks, 1))
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency) as executor:
                 list(executor.map(_do_download_concurrent, indexed))
+            # Clear any leftover status line
+            sys.stdout.write("\r" + " " * (term_width - 1) + "\r")
+            sys.stdout.flush()
 
         else:
             for i, track in enumerate(tracks, 1):
@@ -978,6 +962,45 @@ def sanitise_filename(name: str) -> str:
     """
     illegal = r'[/\\:*?"<>|]'
     return re.sub(illegal, '-', name).strip('. ')
+
+
+def resolve_deezer_url(url: str) -> str:
+    """
+    Resolve a Deezer share link or redirect to its canonical URL.
+
+    Deezer share links (e.g. https://deezer.page.link/…, https://share.deezer.com/…,
+    or any URL that redirects) are followed silently. Tracking parameters are
+    stripped so only scheme + host + path remain.
+
+    If the URL already looks like a canonical Deezer link (contains deezer.com
+    and one of /track/, /album/, /playlist/, /artist/) it is returned as-is
+    without making any HTTP request.
+
+    Args:
+        url: Raw URL from the user (share link or canonical)
+
+    Returns:
+        Clean canonical Deezer URL (no query string or fragment)
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    # Fast path: already a canonical URL — no request needed
+    canonical_patterns = ['/track/', '/album/', '/playlist/', '/artist/', '/song/']
+    if 'deezer.com' in url and any(p in url for p in canonical_patterns):
+        parsed = urlparse(url)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+
+    log(f" Resolving share link: {url}", level="debug")
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; deezload)'}
+        response = requests.get(url, headers=headers, allow_redirects=True, timeout=(10, 15))
+        parsed = urlparse(response.url)
+        clean = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+        log(f" Resolved to: {clean}", level="debug")
+        return clean
+    except Exception as e:
+        log(f" Warning: Could not resolve share link ({e}), using original URL", level="warn")
+        return url
 
 
 def extract_id_and_type(url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1228,10 +1251,11 @@ Configuration:
                 downloader.download_track(args.track_id, output_dir)
 
         elif args.url:
-            # Enhancement 12: auto-detect URL type and route correctly
-            content_id, url_type = extract_id_and_type(args.url)
+            # Resolve share/redirect links before extracting ID
+            resolved = resolve_deezer_url(args.url)
+            content_id, url_type = extract_id_and_type(resolved)
             if not content_id:
-                log(f"Error: Could not extract ID from URL: {args.url}", level="error")
+                log(f"Error: Could not extract ID from URL: {resolved}", level="error")
                 sys.exit(1)
             log(f" Detected URL type: {url_type}", level="debug")
             if url_type == 'track':
@@ -1252,16 +1276,18 @@ Configuration:
                 sys.exit(1)
 
         elif args.playlist:
-            playlist_id = extract_id_from_url(args.playlist)
+            resolved = resolve_deezer_url(args.playlist)
+            playlist_id = extract_id_from_url(resolved)
             if not playlist_id:
-                log(f"Error: Could not extract ID from URL: {args.playlist}", level="error")
+                log(f"Error: Could not extract ID from URL: {resolved}", level="error")
                 sys.exit(1)
             downloader.download_playlist(playlist_id, output_dir)
 
         elif args.album:
-            album_id = extract_id_from_url(args.album)
+            resolved = resolve_deezer_url(args.album)
+            album_id = extract_id_from_url(resolved)
             if not album_id:
-                log(f"Error: Could not extract ID from URL: {args.album}", level="error")
+                log(f"Error: Could not extract ID from URL: {resolved}", level="error")
                 sys.exit(1)
             downloader.download_album(album_id, output_dir)
 
