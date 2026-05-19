@@ -52,7 +52,7 @@ A fast, feature-complete command-line tool for downloading music from Deezer. Su
 ## Requirements
 
 - Python 3.7+
-- A Deezer account with a valid ARL token (see [Getting your ARL token](#getting-your-arl-token))
+- A Premium Deezer account with a valid ARL token (see [Getting your ARL token](#getting-your-arl-token))
 
 ---
 
