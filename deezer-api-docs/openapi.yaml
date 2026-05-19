@@ -1,0 +1,579 @@
+openapi: 3.1.0
+info:
+  title: Deezer gw-light.php API
+  description: |
+    Internal Deezer Gateway API documentation based on the gw-light.php endpoint.
+
+    This API is used by Deezer's web and mobile applications for track information,
+    user data, and download authorization.
+
+    **Important**: This API requires authentication via ARL token.
+  version: "1.0"
+  contact:
+    name: Deezer API
+    url: https://www.deezer.com
+
+servers:
+  - url: https://www.deezer.com/ajax
+    description: Gateway API Server
+  - url: https://api.deezer.com/2.0
+    description: Public REST API
+
+components:
+  securitySchemes:
+    ARLAuth:
+      type: apiKey
+      in: cookie
+      name: arl
+      description: ARL (Authentication Remember Login) token obtained from browser session
+
+  schemas:
+    Track:
+      type: object
+      properties:
+        TRACK_TOKEN:
+          type: string
+          description: Unique token for download URL generation
+        MD5_ORIGIN:
+          type: string
+          description: MD5 hash of original track for encryption
+        MEDIA_VERSION:
+          type: integer
+          description: Media file version number
+        SNG_TITLE:
+          type: string
+          description: Song title
+        title_short:
+          type: string
+          description: Short version of title
+        title_version:
+          type: string
+          description: Version descriptor
+        ART_NAME:
+          type: string
+          description: Artist name
+        ALB_TITLE:
+          type: string
+          description: Album title
+        ALB_ARTIST:
+          type: string
+          description: Album artist
+        ALB_PICTURE:
+          type: string
+          description: Album picture ID
+        TRACK_NUMBER:
+          type: integer
+          description: Track position in album
+        DISK_NUMBER:
+          type: integer
+          description: Disc number
+        GENRE:
+          type: string
+          description: Genre name
+        ISRC:
+          type: string
+          description: International Standard Recording Code
+        DURATION:
+          type: integer
+          description: Duration in seconds
+        LYRICS:
+          type: string
+          description: Track lyrics
+        RELEASE_DATE:
+          type: string
+          format: date
+          description: Release date
+        YEAR:
+          type: integer
+          description: Release year
+        BPM:
+          type: number
+          description: Beats per minute
+        EXPLICIT:
+          type: boolean
+          description: Explicit content flag
+        EXPLICIT_LYRICS:
+          type: boolean
+          description: Explicit lyrics flag
+        COMPILATION:
+          type: boolean
+          description: Compilation album flag
+        TRACK_URL:
+          type: string
+          format: uri
+          description: Direct URL to track
+        CONTRIBUTORS:
+          type: array
+          items:
+            $ref: '#/components/schemas/Contributor'
+
+    Contributor:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        role:
+          type: string
+
+    Album:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        artist:
+          $ref: '#/components/schemas/Artist'
+        tracks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Track'
+        release_date:
+          type: string
+          format: date
+        genre:
+          type: string
+        label:
+          type: string
+        nb_tracks:
+          type: integer
+        duration:
+          type: integer
+        fans:
+          type: integer
+        rating:
+          type: integer
+        cover:
+          type: string
+        cover_small:
+          type: string
+        cover_medium:
+          type: string
+        cover_big:
+          type: string
+        cover_xl:
+          type: string
+        md5_image:
+          type: string
+        tracklist:
+          type: string
+        explicit_lyrics:
+          type: boolean
+        explicit_content_lyrics:
+          type: integer
+        explicit_content_cover:
+          type: integer
+        contributors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Contributor'
+        artist_id:
+          type: integer
+        type:
+          type: string
+          enum: [album]
+
+    Artist:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        link:
+          type: string
+        share:
+          type: string
+        picture:
+          type: string
+        picture_small:
+          type: string
+        picture_medium:
+          type: string
+        picture_big:
+          type: string
+        picture_xl:
+          type: string
+        nb_album:
+          type: integer
+        nb_fan:
+          type: integer
+        radio:
+          type: boolean
+        tracklist:
+          type: string
+        type:
+          type: string
+          enum: [artist]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        country:
+          type: string
+        lang:
+          type: string
+        is_kid:
+          type: boolean
+        explicit_content_level:
+          type: string
+        explicit_content_levels_available:
+          type: array
+          items:
+            type: string
+        tracklist:
+          type: string
+        type:
+          type: string
+          enum: [user]
+
+    Playlist:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        duration:
+          type: integer
+        public:
+          type: boolean
+        is_loved_track:
+          type: boolean
+        collaborative:
+          type: boolean
+        nb_tracks:
+          type: integer
+        fans:
+          type: integer
+        link:
+          type: string
+        share:
+          type: string
+        picture:
+          type: string
+        picture_small:
+          type: string
+        picture_medium:
+          type: string
+        picture_big:
+          type: string
+        picture_xl:
+          type: string
+        checksum:
+          type: string
+        md5_image:
+          type: string
+        picture_type:
+          type: string
+        creator:
+          $ref: '#/components/schemas/User'
+        type:
+          type: string
+          enum: [playlist]
+        tracks:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Track'
+
+    DownloadURL:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Encrypted download URL
+        expires:
+          type: integer
+          description: Unix timestamp of URL expiration
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+            code:
+              type: integer
+
+  parameters:
+    trackId:
+      name: track_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Deezer track ID
+
+    albumId:
+      name: album_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Deezer album ID
+
+    artistId:
+      name: artist_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Deezer artist ID
+
+    playlistId:
+      name: playlist_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Deezer playlist ID
+
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 100
+        maximum: 1000
+      description: Number of items to return
+
+    offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+      description: Offset for pagination
+
+paths:
+  /gw-light.php:
+    post:
+      summary: Gateway API Endpoint
+      description: Main gateway endpoint for Deezer API operations
+      operationId: gatewayRequest
+      security:
+        - ARLAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                api_version:
+                  type: string
+                  enum: ["1.0"]
+                api_method:
+                  type: string
+                  description: API method to call (e.g., deezer.user.get_account)
+                api_token:
+                  type: string
+                  description: Authentication token
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: object
+        '401':
+          description: Unauthorized - Invalid or missing ARL token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden - Invalid license or region restriction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /track/{track_id}:
+    get:
+      summary: Get Track Information
+      description: Retrieve detailed information about a specific track
+      operationId: getTrack
+      tags:
+        - Track
+      parameters:
+        - $ref: '#/components/parameters/trackId'
+      responses:
+        '200':
+          description: Track information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Track'
+        '404':
+          description: Track not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /album/{album_id}:
+    get:
+      summary: Get Album Information
+      description: Retrieve detailed information about a specific album
+      operationId: getAlbum
+      tags:
+        - Album
+      parameters:
+        - $ref: '#/components/parameters/albumId'
+      responses:
+        '200':
+          description: Album information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Album'
+        '404':
+          description: Album not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /album/{album_id}/tracks:
+    get:
+      summary: Get Album Tracks
+      description: Retrieve all tracks from a specific album
+      operationId: getAlbumTracks
+      tags:
+        - Album
+      parameters:
+        - $ref: '#/components/parameters/albumId'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of tracks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Track'
+                  total:
+                    type: integer
+                  next:
+                    type: string
+                    format: uri
+
+  /artist/{artist_id}/albums:
+    get:
+      summary: Get Artist Albums
+      description: Retrieve all albums from a specific artist
+      operationId: getArtistAlbums
+      tags:
+        - Artist
+      parameters:
+        - $ref: '#/components/parameters/artistId'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of albums
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Album'
+                  total:
+                    type: integer
+                  next:
+                    type: string
+                    format: uri
+
+  /playlist/{playlist_id}/tracks:
+    get:
+      summary: Get Playlist Tracks
+      description: Retrieve all tracks from a specific playlist
+      operationId: getPlaylistTracks
+      tags:
+        - Playlist
+      parameters:
+        - $ref: '#/components/parameters/playlistId'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of tracks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Track'
+                  total:
+                    type: integer
+                  next:
+                    type: string
+                    format: uri
+
+  /user/account:
+    get:
+      summary: Get User Account
+      description: Retrieve current user account information
+      operationId: getUserAccount
+      tags:
+        - User
+      security:
+        - ARLAuth: []
+      responses:
+        '200':
+          description: User account information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+tags:
+  - name: Track
+    description: Track-related operations
+  - name: Album
+    description: Album-related operations
+  - name: Artist
+    description: Artist-related operations
+  - name: Playlist
+    description: Playlist-related operations
+  - name: User
+    description: User account operations
