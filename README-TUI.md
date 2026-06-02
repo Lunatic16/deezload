@@ -1,3 +1,8 @@
+<p align="center">
+  <a href="https://github.com/topics/deezer">
+    <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200" alt="Deezer Logo">
+  </a>
+</p>
 # Deezload TUI
 
 A terminal user interface for [deezload](./deezload.py) — browse and download music from Deezer without leaving your terminal.
@@ -53,22 +58,22 @@ Once authenticated, your token is saved to `~/.config/deezload/deezload-config.i
 ## Interface Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Header                                               status │
-├────────────┬────────────────────────────────────────────────┤
-│ 🎵 Deezload│  [ Search input...                 ] [Search]  │
-│────────────│────────────────────────────────────────────────│
-│ 🔍 Search  │                                                 │
-│ 💿 Albums  │   Results table                                 │
-│ 🎵Playlists│   (Type | Title | Artist | Extra)               │
-│ 👤 Artists │                                                 │
-│ ⬇ Downloads│                                                 │
-│            ├────────────────────────────────────────────────│
-│ 👤 username│  ⬇ Downloads                                   │
-│            │  [████████░░░░░░░░░░░░] 45.2%                  │
-│            │  ✓ Artist - Track.flac                          │
-│            │  ✓ Artist - Track.flac                          │
-└────────────┴────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│  Header                                               status  │
+├─────────────┬─────────────────────────────────────────────────┤
+│ 🎵 Deezload │  [ Search input...                 ] [Search]   │
+│─────────────│─────────────────────────────────────────────────│
+│ 🔍 Search   │                                                 │
+│ 💿 Albums   │   Results table                                 │
+│ 🎵Playlists │   (Type | Title | Artist | Extra)               │
+│ 👤 Artists  │                                                 │
+│ ⬇ Downloads │                                                 │
+│             ├─────────────────────────────────────────────────│
+│ 👤 username │  ⬇ Downloads                                    │
+│             │  [████████░░░░░░░░░░░░] 45.2%                    │
+│             │  ✓ Artist - Track.flac                          │
+│             │  ✓ Artist - Track.flac                          │
+└─────────────┴─────────────────────────────────────────────────┘
 ```
 
 ### Sidebar
@@ -144,7 +149,7 @@ Settings are persisted to `~/.config/deezload/deezload-config.ini` alongside you
 ## File Structure
 
 ```
-your-folder/
+deezload/
 ├── deezload.py        # Core downloader (do not modify)
 ├── deezload_tui.py    # TUI — run this
 ├── README.md
