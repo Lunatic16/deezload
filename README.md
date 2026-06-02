@@ -271,7 +271,10 @@ Cover art is downloaded at 1000×1000px and embedded as JPEG.
 ├── deezload.py                 # Main CLI entry point and core logic
 ├── requirements.txt            # Python dependencies
 ├── deezload-config.example.ini # Example configuration file
+├── deezload_tui.py             # TUI — run this
+├── README-TUI.md               # Documentation for the TUI
 └── README.md                   # This documentation
+
 ```
 
 ### Core Logic
