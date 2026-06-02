@@ -3,6 +3,7 @@
     <img src="https://cdn-files.dzcdn.net/cache/slash/images/common/logos/logo-horizontal-white-text.c409af08ede4db772948.svg" width="200" alt="Deezer Logo">
   </a>
 </p>
+
 # Deezload TUI
 
 A terminal user interface for [deezload](./deezload.py) — browse and download music from Deezer without leaving your terminal.
