@@ -85,6 +85,11 @@ class AudioQuality(Enum):
         return mapping.get(self.value, 1)
 
 
+# Fallback order: highest to lowest quality. Used when the requested
+# quality isn't actually available for a given track.
+QUALITY_FALLBACK_ORDER = [AudioQuality.FLAC, AudioQuality.MP3_320, AudioQuality.MP3_128]
+
+
 # Global verbosity flag — set by main() from --verbose / --quiet args
 _VERBOSE = False
 _QUIET = False
@@ -304,53 +309,112 @@ class DeezerDownloader:
         ).decrypt(data)
 
     def get_download_url(self, track_id: str,
-                         track_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+                         track_info: Optional[Dict[str, Any]] = None,
+                         quality: Optional[AudioQuality] = None) -> Tuple[Optional[str], Optional[AudioQuality]]:
         """
         Get the download URL for a track using deezer-py library.
+
+        Tries the requested quality first, then steps down through
+        QUALITY_FALLBACK_ORDER (e.g. FLAC -> MP3_320 -> MP3_128) if the
+        requested quality resolves to a URL that isn't actually playable
+        (Deezer returns a "valid-looking" URL even for unavailable
+        qualities — the CDN just serves an empty/short response for it).
 
         Args:
             track_id: Deezer track ID
             track_info: Pre-fetched track info dict (avoids a redundant API call)
+            quality: Quality to request (defaults to self.quality)
 
         Returns:
-            Download URL or None
+            Tuple of (download URL or None, the AudioQuality actually resolved or None)
         """
         # Reuse caller's track_info if provided; otherwise fetch once
         if track_info is None:
             track_info = self.get_track_info(track_id)
         if not track_info:
-            return None
+            return None, None
 
+        requested_quality = quality or self.quality
+
+        # Build the fallback chain starting at the requested quality and
+        # stepping down through anything lower in QUALITY_FALLBACK_ORDER.
         try:
-            # Get the track token
+            start_idx = QUALITY_FALLBACK_ORDER.index(requested_quality)
+        except ValueError:
+            start_idx = 0
+        fallback_chain = QUALITY_FALLBACK_ORDER[start_idx:]
+
+        for candidate_quality in fallback_chain:
+            url = self._resolve_url_for_quality(track_id, track_info, candidate_quality)
+            if not url:
+                continue
+
+            if not self._url_is_available(url):
+                log(f" {candidate_quality.value} resolved but isn't actually available, trying next quality",
+                    level="debug")
+                continue
+
+            if candidate_quality != requested_quality:
+                log(f" ⚠ {requested_quality.value} not available for this track — "
+                    f"falling back to {candidate_quality.value}", level="warn")
+            else:
+                log(f" ✓ URL resolved via token exchange", level="debug")
+
+            return url, candidate_quality
+
+        log(f" ✗ No available quality could be resolved for track {track_id}", level="error")
+        return None, None
+
+    def _resolve_url_for_quality(self, track_id: str, track_info: Dict[str, Any],
+                                  quality: AudioQuality) -> Optional[str]:
+        """Resolve a download URL for a specific quality, without checking availability."""
+        try:
             token = track_info.get('TRACK_TOKEN')
             if not token:
-                log(" ✗ No track token available", level="warn")
-                return self._construct_encrypted_url(track_id, track_info)
+                return self._construct_encrypted_url(track_id, track_info, quality)
 
-            quality_str = self.quality.value
-
-            # Use deezer-py's get_track_url method
-            url = self.client.get_track_url(token, quality_str)
+            url = self.client.get_track_url(token, quality.value)
             if url:
-                log(f" ✓ URL resolved via token exchange", level="debug")
                 return url
 
             # Primary failed — fall back to encrypted URL construction
             log(" Falling back to encrypted URL construction", level="debug")
-            return self._construct_encrypted_url(track_id, track_info)
+            return self._construct_encrypted_url(track_id, track_info, quality)
 
         except Exception as e:
             log(f"Error getting download URL: {e}", level="debug")
-            return self._construct_encrypted_url(track_id, track_info)
+            return self._construct_encrypted_url(track_id, track_info, quality)
 
-    def _construct_encrypted_url(self, track_id: str,
-                                  track_info: Dict[str, Any]) -> Optional[str]:
+    def _url_is_available(self, url: str) -> bool:
+        """
+        Check whether a resolved download URL actually serves audio.
+
+        Deezer's token exchange (and the encrypted-URL construction) can
+        return a well-formed URL for a quality tier the track simply
+        doesn't have — the CDN then serves a zero-length or error
+        response instead of a 404. A small ranged GET is a reliable way
+        to detect that before committing to a full download.
+        """
+        try:
+            response = self.session.get(url, headers={"Range": "bytes=0-1"}, stream=True)
+            available = response.status_code in (200, 206)
+            if available:
+                content_length = response.headers.get('content-length')
+                if content_length is not None and int(content_length) == 0:
+                    available = False
+            response.close()
+            return available
+        except Exception as e:
+            log(f"Availability check failed: {e}", level="debug")
+            return False
+
+    def _construct_encrypted_url(self, track_id: str, track_info: Dict[str, Any],
+                                  quality: Optional[AudioQuality] = None) -> Optional[str]:
         """Construct encrypted download URL (streamrip approach)."""
         try:
             track_md5 = track_info.get('MD5_ORIGIN', '')
             media_version = str(track_info.get('MEDIA_VERSION', '1') or '1')
-            quality = self.quality.format_id
+            quality_id = (quality or self.quality).format_id
 
             if not track_md5:
                 log(" ✗ MD5_ORIGIN missing — cannot construct fallback URL", level="warn")
@@ -358,7 +422,7 @@ class DeezerDownloader:
 
             # Build the string to encrypt
             # Format: {md5}{quality}{media_version}{track_id}
-            to_encrypt = f"{track_md5}{quality}{media_version}{track_id}"
+            to_encrypt = f"{track_md5}{quality_id}{media_version}{track_id}"
 
             # Pad to multiple of 16 bytes
             padding = 16 - (len(to_encrypt) % 16)
@@ -409,8 +473,10 @@ class DeezerDownloader:
             log(f" ✗ Could not get track info for {track_id}", level="error")
             return None
 
-        # Get download URL, passing track_info to avoid a second API call
-        download_url = self.get_download_url(track_id, track_info=track_info)
+        # Get download URL, passing track_info to avoid a second API call.
+        # This automatically falls back to a lower quality if the requested
+        # one isn't actually available for this track.
+        download_url, resolved_quality = self.get_download_url(track_id, track_info=track_info)
         if not download_url:
             log(f" ✗ Could not get download URL for {track_id}", level="error")
             return None
@@ -422,7 +488,8 @@ class DeezerDownloader:
         # Build filename with safe sanitisation (Enhancement 18)
         artist = track_info.get("ART_NAME") or track_info.get("artist", {}).get("name", "Unknown Artist")
         title = track_info.get("SNG_TITLE") or track_info.get("title", "Unknown Title")
-        extension = ".flac" if self.quality == AudioQuality.FLAC else ".mp3"
+        # Extension reflects the quality actually resolved (post-fallback), not the requested one
+        extension = ".flac" if resolved_quality == AudioQuality.FLAC else ".mp3"
         if track_num is not None:
             raw_name = f"{track_num:02d} - {artist} - {title}{extension}"
         else:
