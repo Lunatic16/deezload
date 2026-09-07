@@ -14,6 +14,7 @@ A fast, feature-complete command-line tool for downloading music from Deezer. Su
 
 - **Any Deezer URL** — tracks, albums, playlists, artists, and share/redirect links all work with a single `--url` flag
 - **Three quality tiers** — MP3 128kbps, MP3 320kbps, FLAC lossless (default)
+- **Automatic quality fallback** — if the requested quality isn't actually available for a track, Deezload steps down (FLAC → MP3 320 → MP3 128) instead of failing the download
 - **Parallel downloads** — configurable thread count with a per-slot live progress bar per thread
 - **Full metadata tagging** — 16+ fields written to ID3v2 (MP3) and Vorbis comments (FLAC)
 - **Cover art** — embedded at 1000×1000px; also saved as `Cover.jpg` in album folders
@@ -127,7 +128,7 @@ python deezload.py [OPTIONS]
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC` | `FLAC` |
+| `--quality QUALITY` | Audio quality: `MP3_128`, `MP3_320`, or `FLAC`. Falls back to the next lower tier automatically if a track isn't available at the requested quality | `FLAC` |
 | `--concurrency` | Number of parallel download threads | `1` |
 | `--output` | Custom output directory path | Current Directory |
 | `--dry-run` | Preview downloads without saving files | Disabled |
@@ -200,7 +201,7 @@ downloads/
 └── ...
 ```
 
-File extension is `.flac` for FLAC quality, `.mp3` for both MP3 tiers.
+File extension is `.flac` for FLAC quality, `.mp3` for both MP3 tiers, based on the quality actually downloaded — if a track fell back to a lower tier, the extension reflects that, not the tier you requested.
 
 ---
 
@@ -271,10 +272,7 @@ Cover art is downloaded at 1000×1000px and embedded as JPEG.
 ├── deezload.py                 # Main CLI entry point and core logic
 ├── requirements.txt            # Python dependencies
 ├── deezload-config.example.ini # Example configuration file
-├── deezload_tui.py             # TUI — run this
-├── README-TUI.md               # Documentation for the TUI
 └── README.md                   # This documentation
-
 ```
 
 ### Core Logic
@@ -300,6 +298,9 @@ The track may be region-locked or unavailable on your account tier. Try a differ
 **Download URL errors / fallback mode**
 If `deezer-py`'s `get_track_url()` fails, the script automatically falls back to constructing an encrypted CDN URL. If both fail, the track is skipped with an error message.
 
+**Track downloaded at a lower quality than requested**
+Not every track is available in every tier — FLAC in particular isn't always present. When the requested quality can't be resolved to a working URL, Deezload automatically retries at the next tier down and logs a `⚠ ... not available for this track — falling back to ...` warning. This is expected behavior, not an error; check the console output to see which tier a given track actually downloaded at. If every tier fails, the track is skipped with an error message.
+
 **A track in a playlist/album was skipped**
 The script logs the error and continues to the next track. Check the console output for the specific error on the skipped track.
 
@@ -310,7 +311,7 @@ The script logs the error and continues to the next track. Check the console out
 1. **Share link resolution** — every URL is passed through `resolve_deezer_url()`, which follows redirects and strips tracking parameters to produce a clean canonical URL. Canonical `deezer.com` URLs are returned immediately with no HTTP request.
 2. **Authentication** — logs in via ARL cookie using `deezer-py`, retrieving a session and license token.
 3. **Track info** — metadata is fetched from Deezer's private gateway API (`gw.get_track`), with automatic fallback to the public REST API at `api.deezer.com`.
-4. **Download URL** — a signed CDN URL is obtained via `deezer-py`'s token exchange. If that fails, a fallback URL is constructed using AES-128-ECB encryption of the track's MD5 hash, quality tier, media version, and ID.
+4. **Download URL** — a signed CDN URL is obtained via `deezer-py`'s token exchange for the requested quality. If that fails, a fallback URL is constructed using AES-128-ECB encryption of the track's MD5 hash, quality tier, media version, and ID. Either way, the resolved URL is verified with a small ranged request before committing to it — Deezer can return a well-formed URL for a quality tier the track doesn't actually have, which otherwise only shows up as an empty/broken file after the fact. If the requested quality isn't available, Deezload automatically retries the same resolution process at the next tier down (FLAC → MP3 320 → MP3 128) and downloads whichever tier succeeds first.
 5. **Stream + decrypt** — the audio stream arrives in 2048-byte chunks. Every third chunk is Blowfish-CBC decrypted using a key derived from the track ID and a fixed secret. Audio is written to a `.part` temporary file and atomically renamed to the final path only on success.
 6. **Tagging** — all available metadata fields and cover art are written using `mutagen`.
 
