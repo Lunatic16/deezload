@@ -583,19 +583,19 @@ class DeezerDownloader:
     def download_track(self, track_id: str, output_dir: str = "downloads",
                        track_num: Optional[int] = None,
                        disc_num: Optional[int] = None,
-                       disc_total: Optional[int] = None,
                        progress_cb=None) -> Optional[str]:
         """
         Download a single track.
 
         Args:
             track_id: Deezer track ID
-            output_dir: Directory to save downloaded file
+            output_dir: Directory to save downloaded file. For a multi-disc
+                        album, the caller passes a per-disc subfolder here
+                        (e.g. ".../Album Name/Disc 2") — filenames themselves
+                        don't need a disc prefix as a result.
             track_num: Optional track number (for album downloads)
-            disc_num: Optional disc number (for album downloads)
-            disc_total: Optional total disc count for the album this track
-                        belongs to — when > 1, the disc number is folded into
-                        the filename so multi-disc albums don't interleave
+            disc_num: Optional disc number (for album downloads) — used for
+                      the DISCNUMBER/TPOS tag, not the filename
             progress_cb: Optional callable(pct: float) for progress updates.
                          When provided the inline \r progress bar is suppressed.
 
@@ -634,12 +634,8 @@ class DeezerDownloader:
         title = track_info.get("SNG_TITLE") or track_info.get("title", "Unknown Title")
         # Extension reflects the quality actually resolved (post-fallback), not the requested one
         extension = ".flac" if resolved_quality == AudioQuality.FLAC else ".mp3"
-        multi_disc = bool(disc_total and disc_total > 1 and disc_num is not None)
         if track_num is not None:
-            if multi_disc:
-                raw_name = f"{disc_num}-{track_num:02d} - {artist} - {title}{extension}"
-            else:
-                raw_name = f"{track_num:02d} - {artist} - {title}{extension}"
+            raw_name = f"{track_num:02d} - {artist} - {title}{extension}"
         else:
             raw_name = f"{artist} - {title}{extension}"
         filename = sanitise_filename(raw_name)
@@ -693,7 +689,19 @@ class DeezerDownloader:
                 part_path.unlink()
             return None
 
-        # Rename .part → final filename only after full successful write
+        # Add metadata tags *before* the file becomes visible at its final
+        # name. Tagging is a second, separate write to the file — if we
+        # renamed first, a filesystem watcher (e.g. GNOME's Tracker/
+        # localsearch indexer, which powers the Nautilus Properties > Audio
+        # tab) could index the file in the brief window between "audio
+        # written" and "tags written" and cache incomplete metadata for it.
+        if MUTAGEN_AVAILABLE:
+            self._add_tags(str(part_path), track_info, track_id,
+                            is_flac=(resolved_quality == AudioQuality.FLAC),
+                            silent=(progress_cb is not None))
+
+        # Rename .part → final filename only after the file is fully
+        # written *and* tagged
         part_path.rename(filepath)
         if progress_cb is None and not _QUIET:
             log(f" ✓ Downloaded: {filepath.name}")
@@ -702,10 +710,6 @@ class DeezerDownloader:
             self.stats['succeeded'] += 1
             if resolved_quality != self.quality:
                 self.stats['fallback'] += 1
-
-        # Add metadata tags if mutagen is available
-        if MUTAGEN_AVAILABLE:
-            self._add_tags(str(filepath), track_info, track_id, silent=(progress_cb is not None))
 
         return str(filepath)
 
@@ -811,7 +815,7 @@ class DeezerDownloader:
         return True
 
     def _add_tags(self, filepath: str, track_info: Dict[str, Any], track_id: str,
-                  silent: bool = False):
+                  is_flac: bool, silent: bool = False):
         """Add comprehensive metadata tags to downloaded file (MP3 or FLAC)"""
         if not MUTAGEN_AVAILABLE:
             return
@@ -938,8 +942,10 @@ class DeezerDownloader:
                 except Exception as lrc_err:
                     log(f" Warning: Could not write .lrc sidecar: {lrc_err}", level="debug")
 
-            # Use appropriate format for FLAC vs MP3
-            if filepath.endswith('.flac'):
+            # Use appropriate format for FLAC vs MP3 (passed in explicitly —
+            # filepath may be a .part temp file at this point, so its
+            # extension can't be trusted to identify the format)
+            if is_flac:
                 # FLAC format (Vorbis comments)
                 audio = FLAC(filepath)
                 if audio.tags is None:
@@ -1147,8 +1153,7 @@ class DeezerDownloader:
 
     def _download_track_list(self, tracks: list, output_dir: str,
                               track_nums: Optional[list] = None,
-                              disc_nums: Optional[list] = None,
-                              disc_total: Optional[int] = None):
+                              disc_nums: Optional[list] = None):
         """
         Download a list of tracks sequentially or concurrently.
 
@@ -1192,7 +1197,7 @@ class DeezerDownloader:
 
                 result = self.download_track(
                     track_id, output_dir,
-                    track_num=t_num, disc_num=d_num, disc_total=disc_total,
+                    track_num=t_num, disc_num=d_num,
                     progress_cb=lambda pct: None,  # suppress inline bar
                 )
 
@@ -1222,8 +1227,7 @@ class DeezerDownloader:
                 d_num = disc_nums[i - 1] if disc_nums else None
                 title = track.get("title", track_id)
                 log(f"\n[{i}/{total}] {title}")
-                self.download_track(track_id, output_dir, track_num=t_num, disc_num=d_num,
-                                     disc_total=disc_total)
+                self.download_track(track_id, output_dir, track_num=t_num, disc_num=d_num)
                 time.sleep(0.5)
 
     def download_album(self, album_id: str, output_dir: str = "downloads"):
@@ -1291,9 +1295,25 @@ class DeezerDownloader:
             disc_nums = [t.get('disk_number', 1) for t in tracks_data]
             disc_total = max(disc_nums) if disc_nums else 1
 
-            self._download_track_list(tracks_data, str(album_dir),
-                                       track_nums=track_nums, disc_nums=disc_nums,
-                                       disc_total=disc_total)
+            if disc_total > 1:
+                # Multi-disc album: give each disc its own subfolder
+                # (Cover.jpg stays shared at the album root, above).
+                by_disc: Dict[int, list] = {}
+                for track, t_num, d_num in zip(tracks_data, track_nums, disc_nums):
+                    by_disc.setdefault(d_num, []).append((track, t_num))
+
+                for d_num in sorted(by_disc.keys()):
+                    disc_dir = album_dir / f"Disc {d_num}"
+                    disc_dir.mkdir(parents=True, exist_ok=True)
+                    disc_tracks = [t for t, _ in by_disc[d_num]]
+                    disc_track_nums = [n for _, n in by_disc[d_num]]
+                    log(f"\n--- Disc {d_num} ({len(disc_tracks)} tracks) ---")
+                    self._download_track_list(disc_tracks, str(disc_dir),
+                                               track_nums=disc_track_nums,
+                                               disc_nums=[d_num] * len(disc_tracks))
+            else:
+                self._download_track_list(tracks_data, str(album_dir),
+                                           track_nums=track_nums, disc_nums=disc_nums)
 
         except Exception as e:
             log(f" ✗ Error downloading album: {e}", level="error")
