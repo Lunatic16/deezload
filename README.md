@@ -192,15 +192,17 @@ downloads/
     └── 03 - Artist Name - Track Three.flac
 ```
 
-**Multi-disc album** (filenames include the disc number so discs don't interleave):
+**Multi-disc album** (each disc gets its own subfolder; the shared cover art stays at the album root):
 ```
 downloads/
 └── Artist Name - Album Title/
     ├── Cover.jpg
-    ├── 1-01 - Artist Name - Track One.flac
-    ├── 1-02 - Artist Name - Track Two.flac
-    ├── 2-01 - Artist Name - Track One.flac
-    └── 2-02 - Artist Name - Track Two.flac
+    ├── Disc 1/
+    │   ├── 01 - Artist Name - Track One.flac
+    │   └── 02 - Artist Name - Track Two.flac
+    └── Disc 2/
+        ├── 01 - Artist Name - Track One.flac
+        └── 02 - Artist Name - Track Two.flac
 ```
 
 **Playlist:**
@@ -324,6 +326,13 @@ The track may be region-locked or unavailable on your account tier. Try a differ
 **Files download but have no tags**
 `mutagen` is not installed. Run `pip install mutagen` and retry.
 
+**Album title doesn't show in GNOME Files → Properties → Audio, but tools like `mediainfo` show it fine**
+This means the tag genuinely is in the file — `mediainfo` reads tags directly and permissively, so if it shows the album, the album title is correctly embedded. What you're seeing is very likely GNOME's file indexer (`tracker`/`localsearch`, which powers that Properties tab and search) showing stale or incomplete metadata for that specific file rather than a tagging bug. Two things worth checking on Fedora:
+- `tracker3 info /path/to/file.flac` — if this also shows no album, it's a tracker-side extraction/cache issue, not the file. Try `tracker3 index --file /path/to/file.flac` to force a fresh extract, or `tracker3 reset -s` to clear tracker's index entirely and let it rebuild (this can take a while for a large library).
+- Compare a file that *does* show its album correctly against one that doesn't with `metaflac --list --block-type=VORBIS_COMMENT file.flac` (FLAC) or `mid3v2 -l file.mp3` (MP3) — if both look structurally identical, it's almost certainly the indexer, not Deezload.
+
+As of this version, Deezload also tags files *before* renaming them into their final visible filename (previously tagging happened as a second write after the file was already visible), which removes one plausible race where a filesystem watcher could index the file in the brief window before tags were written.
+
 **Download URL errors / fallback mode**
 If `deezer-py`'s `get_track_url()` fails, the script automatically falls back to constructing an encrypted CDN URL. If both fail, the track is skipped with an error message.
 
@@ -347,7 +356,7 @@ The script logs the error and continues to the next track. Check the console out
 2. **Authentication** — logs in via ARL cookie using `deezer-py`, retrieving a session and license token.
 3. **Track info** — metadata is fetched from Deezer's private gateway API (`gw.get_track`), with automatic fallback to the public REST API at `api.deezer.com`.
 4. **Download URL** — a signed CDN URL is obtained via `deezer-py`'s token exchange for the requested quality. If that fails, a fallback URL is constructed using AES-128-ECB encryption of the track's MD5 hash, quality tier, media version, and ID. Either way, the resolved URL is verified with a small ranged request before committing to it — Deezer can return a well-formed URL for a quality tier the track doesn't actually have, which otherwise only shows up as an empty/broken file after the fact. If the requested quality isn't available, Deezload automatically retries the same resolution process at the next tier down (FLAC → MP3 320 → MP3 128, bounded below by `--min-quality` if set) and downloads whichever tier succeeds first.
-5. **Stream + decrypt** — the audio stream arrives in 2048-byte chunks. Every third chunk is Blowfish-CBC decrypted using a key derived from the track ID and a fixed secret. Audio is written to a `.part` temporary file. If the connection drops partway through, the `.part` file is kept (truncated to the last complete block) so the next attempt — up to `--retries` times, with exponential backoff — resumes via an HTTP `Range` request instead of starting over. Once the full expected size is verified, the file is atomically renamed to its final path.
+5. **Stream + decrypt** — the audio stream arrives in 2048-byte chunks. Every third chunk is Blowfish-CBC decrypted using a key derived from the track ID and a fixed secret. Audio is written to a `.part` temporary file. If the connection drops partway through, the `.part` file is kept (truncated to the last complete block) so the next attempt — up to `--retries` times, with exponential backoff — resumes via an HTTP `Range` request instead of starting over. Once the full expected size is verified, metadata is written to the `.part` file (see step 7) and only then is it atomically renamed to its final path — the file never appears at its visible name partially tagged.
 6. **Lyrics** — unless `--no-lyrics` is set, synced and plain lyrics are fetched from Deezer's authenticated lyrics endpoint. Synced lyrics are embedded as an ID3 `SYLT` frame (MP3) and written as a `.lrc` sidecar file (both formats); plain lyrics are embedded as USLT (MP3) or a `LYRICS` Vorbis comment (FLAC).
 7. **Tagging** — all available metadata fields (including genre, resolved from its numeric ID via the API) and cover art are written using `mutagen`.
 8. **Summary** — after any non-dry-run download, a one-line summary reports how many tracks succeeded, how many fell back to a lower quality, how many already existed, and how many failed.
