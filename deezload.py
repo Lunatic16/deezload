@@ -101,6 +101,62 @@ _QUIET = False
 # file keeps a full record even when the console is running --quiet.
 _LOG_FILE_HANDLE = None
 
+# --- Tokyo Night palette + color support -----------------------------------
+# Truecolor ANSI escapes matching the Tokyo Night theme. Auto-disabled when
+# NO_COLOR is set, stdout isn't a TTY, or --no-color is passed — so redirected
+# output, --log-file content, and piped output all stay plain, uncolored text.
+_COLOR_ENABLED = False
+
+
+def _rgb(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+C_RESET = "\033[0m"
+C_BLUE = _rgb(122, 162, 247)     # #7aa2f7 — info / structure
+C_CYAN = _rgb(125, 207, 255)     # #7dcfff — percentages / highlights
+C_GREEN = _rgb(158, 206, 106)    # #9ece6a — success
+C_ORANGE = _rgb(255, 158, 100)   # #ff9e64 — fallback / caution
+C_YELLOW = _rgb(224, 175, 104)   # #e0af68 — warnings
+C_RED = _rgb(247, 118, 142)      # #f7768e — errors
+C_PURPLE = _rgb(187, 154, 247)   # #bb9af7 — resume / misc accents
+C_GRAY = _rgb(86, 95, 137)       # #565f89 — debug / muted metadata
+
+_ICON_COLORS = {
+    '✓': C_GREEN,
+    '✗': C_RED,
+    '⚠': C_ORANGE,
+    '⏭': C_CYAN,
+    '↻': C_PURPLE,
+}
+_LEVEL_COLORS = {'debug': C_GRAY, 'warn': C_YELLOW, 'error': C_RED}
+_TRACK_HEADER_RE = re.compile(r'^\s*\[\d+/\d+\]')
+
+
+def _detect_color_support() -> bool:
+    if os.environ.get('NO_COLOR') is not None:
+        return False
+    if os.environ.get('FORCE_COLOR') is not None:
+        return True
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _colorize(msg: str, level: str) -> str:
+    """Wrap a log message in the color matching its leading icon or level."""
+    if not _COLOR_ENABLED:
+        return msg
+    stripped = msg.lstrip('\n \t')
+    for icon, color in _ICON_COLORS.items():
+        if stripped.startswith(icon):
+            return f"{color}{msg}{C_RESET}"
+    if _TRACK_HEADER_RE.match(stripped):
+        return f"{C_BLUE}{msg}{C_RESET}"
+    color = _LEVEL_COLORS.get(level)
+    return f"{color}{msg}{C_RESET}" if color else msg
+
 
 def log(msg: str, level: str = "info") -> None:
     """
@@ -123,7 +179,47 @@ def log(msg: str, level: str = "info") -> None:
         return
     if level == "info" and _QUIET:
         return
-    print(msg)
+    print(_colorize(msg, level))
+
+
+def print_banner() -> None:
+    """Small Tokyo-Night-styled header, skipped entirely in --quiet mode."""
+    if _QUIET:
+        return
+    width = 44
+    title = "DEEZLOAD".center(width)
+    subtitle = "Deezer Music Downloader".center(width)
+    top = "╭" + "─" * width + "╮"
+    mid = "│" + title + "│"
+    sub = "│" + subtitle + "│"
+    bot = "╰" + "─" * width + "╯"
+    if _COLOR_ENABLED:
+        print(f"{C_BLUE}{top}{C_RESET}")
+        print(f"{C_BLUE}│{C_PURPLE}{title}{C_BLUE}│{C_RESET}")
+        print(f"{C_BLUE}│{C_GRAY}{subtitle}{C_BLUE}│{C_RESET}")
+        print(f"{C_BLUE}{bot}{C_RESET}")
+    else:
+        print(top)
+        print(mid)
+        print(sub)
+        print(bot)
+
+
+def _format_speed(bytes_per_sec: float) -> str:
+    if bytes_per_sec <= 0:
+        return "-- KB/s"
+    if bytes_per_sec >= 1024 * 1024:
+        return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+    return f"{bytes_per_sec / 1024:.0f} KB/s"
+
+
+def _format_eta(seconds: float) -> str:
+    if seconds <= 0 or seconds == float('inf'):
+        return "--:--"
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 class DeezerDownloader:
@@ -174,19 +270,28 @@ class DeezerDownloader:
         }
 
     def print_summary(self) -> None:
-        """Print a one-line summary of everything downloaded in this run."""
+        """Print a small styled recap of everything downloaded in this run."""
         s = self.stats
         if not any(s.values()):
             return
-        parts = [f"{s['succeeded']} downloaded"]
+
+        rows = [("✓ Downloaded", s['succeeded'], C_GREEN)]
         if s['fallback']:
-            parts.append(f"{s['fallback']} at reduced quality")
+            rows.append(("  ↳ at reduced quality", s['fallback'], C_ORANGE))
         if s['skipped_existing']:
-            parts.append(f"{s['skipped_existing']} already existed")
+            rows.append(("⏭ Already existed", s['skipped_existing'], C_CYAN))
         if s['failed']:
-            parts.append(f"{s['failed']} failed")
+            rows.append(("✗ Failed", s['failed'], C_RED))
+
+        label_width = max(len(label) for label, _, _ in rows)
+        rule = "─" * (label_width + 8)
+
         log("")
-        log("Summary: " + ", ".join(parts) + ".")
+        log(f"{C_GRAY}{rule}{C_RESET}" if _COLOR_ENABLED else rule)
+        for label, count, color in rows:
+            text = f"{label.ljust(label_width)}  {count}"
+            log(f"{color}{text}{C_RESET}" if _COLOR_ENABLED else text)
+        log(f"{C_GRAY}{rule}{C_RESET}" if _COLOR_ENABLED else rule)
 
     def _create_session(self) -> requests.Session:
         """Create a requests session with retry logic and timeouts"""
@@ -778,6 +883,9 @@ class DeezerDownloader:
         downloaded = resume_offset
         block_index = resume_offset // chunk_size
         bf_key = self._generate_blowfish_key(track_id)
+        attempt_start = time.time()
+        attempt_start_bytes = downloaded
+        last_render = 0.0
 
         if resumed:
             log(f" ↻ Resuming from {resume_offset:,} bytes", level="debug")
@@ -798,11 +906,29 @@ class DeezerDownloader:
                         if progress_cb is not None:
                             progress_cb(pct)
                         elif not _QUIET:
-                            # Sequential mode: simple inline progress bar
-                            bar_width = 30
+                            # Sequential mode: inline progress bar with speed + ETA,
+                            # throttled to ~10 redraws/sec regardless of chunk size
+                            now = time.time()
+                            if now - last_render < 0.1 and pct < 100:
+                                continue
+                            last_render = now
+                            elapsed = max(now - attempt_start, 0.001)
+                            speed_bps = (downloaded - attempt_start_bytes) / elapsed
+                            remaining = max(total_size - downloaded, 0)
+                            eta_s = remaining / speed_bps if speed_bps > 0 else 0
+
+                            bar_width = 28
                             filled = int(bar_width * pct / 100)
-                            bar = "█" * filled + "░" * (bar_width - filled)
-                            print(f"\r [{bar}] {pct:5.1f}%", end="", flush=True)
+                            if _COLOR_ENABLED:
+                                bar = (f"{C_BLUE}{'█' * filled}"
+                                       f"{C_GRAY}{'░' * (bar_width - filled)}{C_RESET}")
+                                pct_str = f"{C_CYAN}{pct:5.1f}%{C_RESET}"
+                                meta_str = f"{C_GRAY}{_format_speed(speed_bps)} ETA {_format_eta(eta_s)}{C_RESET}"
+                            else:
+                                bar = "█" * filled + "░" * (bar_width - filled)
+                                pct_str = f"{pct:5.1f}%"
+                                meta_str = f"{_format_speed(speed_bps)} ETA {_format_eta(eta_s)}"
+                            print(f"\r [{bar}] {pct_str} {meta_str}", end="", flush=True)
         finally:
             if progress_cb is None and not _QUIET:
                 print()  # newline after the progress bar, success or not
@@ -1459,11 +1585,14 @@ def search_and_select(query: str, search_type: str = "track", limit: int = 10,
     else:
         # Interactive prompt — printed directly (not via log()) so it always
         # shows up even when running with --quiet.
-        print(f"\nSearch results for '{query}' ({search_type}):")
+        header = f"\nSearch results for '{query}' ({search_type}):"
+        print(f"{C_BLUE}{header}{C_RESET}" if _COLOR_ENABLED else header)
         for i, item in enumerate(results, 1):
-            print(f"  {i}. {_describe_search_result(item, search_type)}")
+            idx = f"{C_CYAN}{i:>2}.{C_RESET}" if _COLOR_ENABLED else f"{i:>2}."
+            print(f"  {idx} {_describe_search_result(item, search_type)}")
+        prompt = f"\nSelect 1-{len(results)} (or Enter to cancel): "
         try:
-            choice = input(f"\nSelect 1-{len(results)} (or Enter to cancel): ").strip()
+            choice = input(f"{C_GRAY}{prompt}{C_RESET}" if _COLOR_ENABLED else prompt).strip()
         except EOFError:
             choice = ""
         if not choice:
@@ -1669,6 +1798,12 @@ Configuration:
         action="store_true",
         help="Skip fetching lyrics (plain + synced) to speed up downloads"
     )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output (also respects the NO_COLOR env var; "
+             "color auto-disables when output isn't a terminal)"
+    )
     # Enhancement 8 (dry-run flag)
     parser.add_argument(
         "--dry-run",
@@ -1679,9 +1814,10 @@ Configuration:
     args = parser.parse_args()
 
     # Enhancement 9: set global verbosity flags
-    global _VERBOSE, _QUIET, _LOG_FILE_HANDLE
+    global _VERBOSE, _QUIET, _LOG_FILE_HANDLE, _COLOR_ENABLED
     _VERBOSE = args.verbose
     _QUIET = args.quiet
+    _COLOR_ENABLED = _detect_color_support() and not args.no_color
 
     if args.log_file:
         try:
@@ -1689,6 +1825,8 @@ Configuration:
             _LOG_FILE_HANDLE.write(f"\n=== Deezload run started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         except Exception as e:
             print(f"Warning: could not open log file {args.log_file}: {e}")
+
+    print_banner()
 
     # Load config file
     config = load_config()
