@@ -91,7 +91,7 @@ pip install -r requirements.txt
 Or install manually:
 
 ```bash
-pip install deezer-py requests pycryptodome mutagen
+pip install deezer-py requests pycryptodome mutagen textual
 ```
 
 > [!NOTE]
